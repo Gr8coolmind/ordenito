@@ -15,8 +15,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: sudo apt-get update -q && sudo apt-get install -y -q poppler-utils shellcheck
-      - run: python -m unittest discover -s tests -v
+      - run: sudo apt-get update -q && sudo apt-get install -y -q poppler-utils shellcheck xvfb
+      - name: Pruebas (incluida la app, en una pantalla virtual)
+        run: xvfb-run -a python -m unittest discover -s tests -v
       - run: shellcheck instalar.sh desinstalar.sh
       - name: Instalador (sin servicio) y reglas de ejemplo
         run: |
@@ -58,5 +59,25 @@ jobs:
           cat ~/.local/state/ordenito/errores.log || true
           ls -la ~/Downloads
           exit 1
+      - name: Instalar la app (con Tkinter de Homebrew)
+        run: |
+          brew install python-tk
+          ./instalar.sh
+          test -x ~/Applications/Ordenito.app/Contents/MacOS/Ordenito
+          test -s ~/Applications/Ordenito.app/Contents/Resources/ordenito.icns
+          plutil -lint ~/Applications/Ordenito.app/Contents/Info.plist
+      - name: La app abre en macOS (captura de pantalla)
+        run: |
+          open ~/Applications/Ordenito.app
+          sleep 8
+          pgrep -f ordenito_app.py
+          screencapture -x captura-macos.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: captura-macos
+          path: captura-macos.png
       - name: Desinstalar
-        run: ./desinstalar.sh && test ! -e ~/Library/LaunchAgents/com.gr8coolmind.ordenito.plist
+        run: |
+          ./desinstalar.sh
+          test ! -e ~/Library/LaunchAgents/com.gr8coolmind.ordenito.plist
+          test ! -e ~/Applications/Ordenito.app

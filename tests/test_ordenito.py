@@ -316,7 +316,7 @@ class TestCorregir(Base):
         self.assertEqual(ordenito.clasificar(f, self.reglas).destino, "Docs/Uni/Redes")
         salida = self.corregir(f, self.home / "Docs/Uni/Seguridad", todas=True)
         self.assertTrue((self.home / "Docs/Uni/Seguridad/caso.docx").exists())
-        self.assertIn("pedro marte", ordenito.CONFIG.read_text())
+        self.assertIn("pedro marte", ordenito.CONFIG.read_text().lower())
         self.assertIn("La próxima vez", salida)
         # Después: otro documento del mismo autor ya va solo a Seguridad
         g = docx(self.dl / "caso2.docx", "subnetting vlan router " * 3, autor="Pedro Marte")
@@ -326,12 +326,12 @@ class TestCorregir(Base):
         f = self.archivo("x.txt", "algo")
         self.corregir(f, self.home / "Docs/Uni/Seguridad", pistas=["Ana Rivas"])
         bloque = ordenito.CONFIG.read_text().split("[Docs/Uni/Seguridad]")[1].split("[")[0]
-        self.assertIn("fuertes: carlos ruiz, ana rivas", bloque)
+        self.assertIn("fuertes: carlos ruiz, ana rivas", bloque.lower())
 
     def test_corregir_a_carpeta_nueva_crea_el_bloque(self):
         f = self.archivo("receta.txt", "algo")
         self.corregir(f, self.home / "Docs/Cocina", pistas=["Chef Juan"])
-        self.assertIn("[Docs/Cocina]\nfuertes: chef juan", ordenito.CONFIG.read_text())
+        self.assertIn("[Docs/Cocina]\nfuertes: Chef Juan", ordenito.CONFIG.read_text())
         self.assertTrue(any(r.destino == "Docs/Cocina" for r in ordenito.leer_reglas()))
 
     def test_corregir_en_su_misma_carpeta_via_enlace_no_mueve(self):

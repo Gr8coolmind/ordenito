@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 HOME = Path.home()
 MAC = sys.platform == "darwin"
@@ -58,6 +58,8 @@ class Regla:
     palabras: list = field(default_factory=list)
     fuertes: list = field(default_factory=list)
     extensiones: set = field(default_factory=set)
+    fuertes_texto: list = field(default_factory=list)   # tal como están escritas (para mostrarlas)
+    palabras_texto: list = field(default_factory=list)
 
     @property
     def comodin(self):
@@ -96,13 +98,17 @@ def _bloques(ruta=None):
         elif not reglas:
             sys.exit(f"{ruta}:{n}: hay palabras antes del primer [destino].")
         elif linea.lower().startswith("fuertes:"):
-            reglas[-1].fuertes.extend(normalizar(p).strip() for p in linea.split(":", 1)[1].split(",") if p.strip())
+            crudas = [p.strip() for p in linea.split(":", 1)[1].split(",") if p.strip()]
+            reglas[-1].fuertes_texto.extend(crudas)
+            reglas[-1].fuertes.extend(normalizar(p).strip() for p in crudas)
         elif linea.lower().startswith("extensiones:"):
             reglas[-1].extensiones.update(
                 "." + e.strip().lstrip(".").lower()
                 for e in linea.split(":", 1)[1].split(",") if e.strip())
         else:
-            reglas[-1].palabras.extend(normalizar(p).strip() for p in linea.split(",") if p.strip())
+            crudas = [p.strip() for p in linea.split(",") if p.strip()]
+            reglas[-1].palabras_texto.extend(crudas)
+            reglas[-1].palabras.extend(normalizar(p).strip() for p in crudas)
     return reglas
 
 
@@ -364,6 +370,25 @@ def notificar(titulo, cuerpo):
                        check=False)
 
 
+def pendientes(dl=None):
+    """Archivos de Descargas que Ordenito tendría que mirar."""
+    dl = dl or carpeta_descargas()
+    ignorados = set(_json("ignorados.json", []))
+    return [f for f in (sorted(dl.iterdir()) if dl.is_dir() else [])
+            if f.is_file() and not f.name.startswith(".") and f.suffix.lower() not in EN_CURSO
+            and f.name not in ignorados]
+
+
+def vista_previa():
+    """[(archivo, Resultado, carpeta destino, archivo idéntico o None)] sin mover nada."""
+    reglas, plan = leer_reglas(), []
+    for f in pendientes():
+        res = clasificar(f, reglas)
+        carpeta = ruta_destino(res.destino) if res.destino else None
+        plan.append((f, res, carpeta, gemelo(f, carpeta) if carpeta else None))
+    return plan
+
+
 def ordenar(simular=False, esperar=True, avisar=True):
     reglas, dl = leer_reglas(), carpeta_descargas()
     ignorados = set(_json("ignorados.json", []))
@@ -408,17 +433,15 @@ def ordenar(simular=False, esperar=True, avisar=True):
     return movidos
 
 
-def deshacer(n=1):
-    registros = _historial()
-    if n < 1 or not registros:
-        print("No hay movimientos que deshacer.")
-        return
-    ultimos, resto = registros[-n:], registros[:-n]
-    ignorados = set(_json("ignorados.json", []))
-    for r in reversed(ultimos):
+def deshacer_indices(indices):
+    """Devuelve a su lugar los movimientos del historial con esos índices. -> [(ok, mensaje)]"""
+    registros, indices = _historial(), set(indices)
+    ignorados, mensajes = set(_json("ignorados.json", [])), []
+    for i in sorted(indices, reverse=True):
+        r = registros[i]
         actual, origen = Path(r["hacia"]), Path(r["desde"])
         if not actual.exists():
-            print(f"  ✗ {actual.name}: ya no está en {bonito(actual.parent)}, lo salto")
+            mensajes.append((False, f"{actual.name}: ya no está en {bonito(actual.parent)}"))
             continue
         vuelta = libre(origen.parent, origen.name)
         origen.parent.mkdir(parents=True, exist_ok=True)
@@ -426,10 +449,20 @@ def deshacer(n=1):
         if not MAC and actual.is_relative_to(cesto()):
             (papelera() / "info" / f"{actual.name}.trashinfo").unlink(missing_ok=True)
         ignorados.add(vuelta.name)  # para que el servicio no lo vuelva a mover
-        print(f"  ↩ {vuelta.name}  →  {bonito(vuelta.parent)}")
+        mensajes.append((True, f"{vuelta.name}  →  {bonito(vuelta.parent)}"))
     _guardar_json("ignorados.json", sorted(ignorados))
     with (ESTADO / "historial.jsonl").open("w", encoding="utf-8") as h:
-        h.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in resto)
+        h.writelines(json.dumps(r, ensure_ascii=False) + "\n" for i, r in enumerate(registros) if i not in indices)
+    return mensajes
+
+
+def deshacer(n=1):
+    total = len(_historial())
+    if n < 1 or not total:
+        print("No hay movimientos que deshacer.")
+        return
+    for ok, mensaje in deshacer_indices(range(max(0, total - n), total)):
+        print(f"  {'↩' if ok else '✗'} {mensaje}")
 
 
 def historial(n=15):
@@ -466,16 +499,34 @@ def propia(carpeta, destinos):
     return carpeta not in destinos and any(carpeta.is_relative_to(d) for d in destinos)
 
 
-def revisar(carpeta):
-    raiz, reglas, distintos = real(carpeta), leer_reglas(), 0
+def fuera_de_lugar(carpeta):
+    """[(archivo, carpeta donde debería estar, motivo)] según las reglas. No mueve nada."""
+    raiz, reglas, lista = real(carpeta), leer_reglas(), []
     destinos = {real(ruta_destino(r.destino)) for r in reglas if not r.comodin}
     for f in sorted(p for p in raiz.rglob("*") if p.is_file() and not p.name.startswith(".")):
         if propia(f.parent, destinos):
             continue
         res = clasificar(f, reglas)
         if res.destino and real(ruta_destino(res.destino)) != f.parent:
-            distintos += 1
-            print(f"  {bonito(f)}\n      → {bonito(ruta_destino(res.destino))}  {gris(f'({res.motivo})')}")
+            lista.append((f, ruta_destino(res.destino), res.motivo))
+    return lista
+
+
+def mover(f, carpeta, **extra):
+    """Mueve sin pisar nada y lo anota en el historial (para poder deshacer)."""
+    carpeta = Path(carpeta)
+    carpeta.mkdir(parents=True, exist_ok=True)
+    nuevo = libre(carpeta, f.name)
+    shutil.move(str(f), str(nuevo))
+    _registrar(f, nuevo, **extra)
+    return nuevo
+
+
+def revisar(carpeta):
+    lista = fuera_de_lugar(carpeta)
+    for f, destino, motivo in lista:
+        print(f"  {bonito(f)}\n      → {bonito(destino)}  {gris(f'({motivo})')}")
+    distintos = len(lista)
     print(f"\n{distintos} archivo(s) estarían en otro lugar según tus reglas. No se movió nada.")
     print(gris("Las subcarpetas que creaste tú dentro de un destino se respetan y no se revisan."))
 
@@ -532,7 +583,7 @@ def agregar_fuertes(destino, pistas, ruta=None):
     """Agrega pistas a la línea 'fuertes:' del bloque [destino] (o crea el bloque)."""
     ruta = ruta or CONFIG
     lineas = ruta.read_text(encoding="utf-8").splitlines()
-    nuevas = ", ".join(normalizar(p).strip() for p in pistas)
+    nuevas = ", ".join(p.strip() for p in pistas)
     try:
         i = next(n for n, l in enumerate(lineas) if l.strip() == f"[{destino}]")
     except StopIteration:
@@ -550,26 +601,33 @@ def agregar_fuertes(destino, pistas, ruta=None):
     ruta.write_text("\n".join(lineas) + "\n", encoding="utf-8")
 
 
+def destino_de(carpeta):
+    """Nombre del bloque de reglas para una carpeta (el existente o uno nuevo relativo a HOME)."""
+    carpeta, casa = real(carpeta), real(HOME)
+    return next((r.destino for r in leer_reglas() if not r.comodin and real(ruta_destino(r.destino)) == carpeta),
+                str(carpeta.relative_to(casa)) if carpeta.is_relative_to(casa) else str(carpeta))
+
+
+def pistas_nuevas(f, destino):
+    """Pistas de identidad del archivo que ese destino todavía no conoce."""
+    ya = {p for r in leer_reglas() if r.destino == destino for p in r.fuertes}
+    return [p for p in candidatas(f) if normalizar(p).strip() not in ya]
+
+
 def corregir(archivo, carpeta, pistas=None, todas=False):
     f, carpeta = real(archivo), Path(carpeta).expanduser()
     if not f.is_file():
         sys.exit(f"No existe el archivo: {f}")
     carpeta = real(carpeta if carpeta.is_absolute() else HOME / carpeta)
-    reglas, casa = leer_reglas(), real(HOME)
-    destino = next((r.destino for r in reglas if not r.comodin and real(ruta_destino(r.destino)) == carpeta),
-                   str(carpeta.relative_to(casa)) if carpeta.is_relative_to(casa) else str(carpeta))
+    destino = destino_de(carpeta)
 
     if f.parent != carpeta:
-        nuevo = libre(carpeta, f.name)
-        carpeta.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(f), str(nuevo))
-        _registrar(f, nuevo, corregido=True)
+        nuevo = mover(f, carpeta, corregido=True)
         print(f"  📁 {f.name}  →  {bonito(carpeta)}")
         f = nuevo
 
     if pistas is None:
-        ya = {p for r in reglas if r.destino == destino for p in r.fuertes}
-        sugeridas = [p for p in candidatas(f) if normalizar(p).strip() not in ya]
+        sugeridas = pistas_nuevas(f, destino)
         if not sugeridas:
             print(gris("  No encontré pistas nuevas (autor, código o docente) para aprender."))
             pistas = []
@@ -599,8 +657,8 @@ def corregir(archivo, carpeta, pistas=None, todas=False):
               f"Mira por qué con: ordenito explicar \"{f}\"")
 
 
-def duplicados(carpeta, quitar=False):
-    """Busca archivos idénticos; con quitar=True manda las copias sobrantes a la papelera."""
+def grupos_duplicados(carpeta):
+    """Grupos de archivos idénticos. El primero de cada grupo es el que conviene conservar."""
     raiz = Path(carpeta).expanduser()
     por_tam = {}
     for f in raiz.rglob("*"):
@@ -611,10 +669,30 @@ def duplicados(carpeta, quitar=False):
         for f in mismos:
             grupos.setdefault(huella(f), []).append(f)
     copia = re.compile(r"\s*\(\d+\)$")
-    sobran, ahorro = 0, 0
+    resultado = []
     for g in (g for g in grupos.values() if len(g) > 1):
         # Se queda el de nombre "limpio" (sin "(1)") y, si empatan, el más antiguo
         g.sort(key=lambda f: (bool(copia.search(f.stem)), f.stat().st_mtime, len(f.name)))
+        resultado.append(g)
+    return sorted(resultado, key=lambda g: str(g[0]))
+
+
+def quitar_copias(grupos):
+    """Manda a la papelera todo menos el primero de cada grupo. -> (copias, bytes)"""
+    n, ahorro = 0, 0
+    for g in grupos:
+        for f in g[1:]:
+            if f.exists():
+                ahorro += f.stat().st_size
+                _registrar(f, a_papelera(f), duplicado_de=str(g[0]))
+                n += 1
+    return n, ahorro
+
+
+def duplicados(carpeta, quitar=False):
+    """Busca archivos idénticos; con quitar=True manda las copias sobrantes a la papelera."""
+    sobran, ahorro = 0, 0
+    for g in grupos_duplicados(carpeta):
         print(f"  ✓ {bonito(g[0])}")
         for f in g[1:]:
             sobran, ahorro = sobran + 1, ahorro + f.stat().st_size
@@ -629,6 +707,93 @@ def duplicados(carpeta, quitar=False):
         print(f"\n{sobran} copia(s) a la papelera ({ahorro / 1e6:.1f} MB). Se recuperan con 'ordenito deshacer {sobran}'.")
     else:
         print(f"\n{sobran} copia(s) repetida(s), {ahorro / 1e6:.1f} MB. Quítalas con: ordenito duplicados {carpeta} --papelera")
+
+
+# ─────────────────────── edición de reglas ───────────────────────
+
+def _limites_bloque(lineas, destino):
+    """(inicio, fin) del bloque [destino] en las líneas, o None."""
+    i = next((n for n, l in enumerate(lineas) if l.strip() == f"[{destino}]"), None)
+    if i is None:
+        return None
+    fin = next((n for n in range(i + 1, len(lineas)) if lineas[n].strip().startswith("[")), len(lineas))
+    while fin > i + 1 and not lineas[fin - 1].strip():  # las líneas en blanco del final no son del bloque
+        fin -= 1
+    return i, fin
+
+
+def guardar_bloque(destino, fuertes=(), palabras=(), extensiones=(), anterior=None, ruta=None):
+    """Crea o reemplaza un bloque de reglas. Conserva los comentarios del bloque anterior."""
+    ruta = ruta or CONFIG
+    lineas = ruta.read_text(encoding="utf-8").splitlines() if ruta.exists() else []
+    nuevo = [f"[{destino}]"]
+    lim = _limites_bloque(lineas, anterior or destino)
+    if lim:
+        nuevo += [l for l in lineas[lim[0] + 1:lim[1]] if l.strip().startswith("#")]
+    if extensiones:
+        nuevo.append("extensiones: " + ", ".join(e.lstrip(".") for e in extensiones))
+    if fuertes:
+        nuevo.append("fuertes: " + ", ".join(fuertes))
+    if palabras:
+        nuevo.append(", ".join(palabras))
+    if lim:
+        lineas[lim[0]:lim[1]] = nuevo
+    else:
+        lineas += ["", *nuevo]
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+
+
+def eliminar_bloque(destino, ruta=None):
+    """Quita un bloque de reglas (la carpeta y sus archivos no se tocan)."""
+    ruta = ruta or CONFIG
+    lineas = ruta.read_text(encoding="utf-8").splitlines()
+    lim = _limites_bloque(lineas, destino)
+    if lim:
+        del lineas[lim[0]:lim[1]]
+        ruta.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+
+
+# ───────────────────────── servicio y sistema ─────────────────────────
+
+ETIQUETA_MAC = "com.gr8coolmind.ordenito"
+
+
+def _plist():
+    return HOME / "Library" / "LaunchAgents" / f"{ETIQUETA_MAC}.plist"
+
+
+def servicio_activo():
+    """¿Está vigilando Descargas el servicio automático?"""
+    try:
+        if MAC:
+            return subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{ETIQUETA_MAC}"],
+                                  capture_output=True, timeout=10).returncode == 0
+        return subprocess.run(["systemctl", "--user", "is-active", "--quiet", "ordenito.path"],
+                              timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def cambiar_servicio(encender):
+    """Enciende o apaga el servicio. Devuelve True si quedó como se pidió."""
+    try:
+        if MAC:
+            accion = "bootstrap" if encender else "bootout"
+            subprocess.run(["launchctl", accion, f"gui/{os.getuid()}", str(_plist())],
+                           capture_output=True, timeout=15)
+        else:
+            subprocess.run(["systemctl", "--user", "enable" if encender else "disable", "--now",
+                            "ordenito.path"], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return servicio_activo() == encender
+
+
+def abrir(ruta):
+    """Abre una carpeta o archivo con la aplicación del sistema."""
+    subprocess.Popen(["open" if MAC else "xdg-open", str(ruta)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # ───────────────────────────── consola ─────────────────────────────
@@ -662,6 +827,8 @@ def main(argv=None):
     s.add_argument("carpeta", help="carpeta correcta (ej. ~/Documents/Universidad/Redes)")
     s.add_argument("--pista", action="append", metavar="TEXTO", help="pista fuerte a aprender (repetible)")
     s.add_argument("--todas", action="store_true", help="aprende todas las pistas sugeridas sin preguntar")
+    s = sub.add_parser("servicio", help="enciende, apaga o muestra el servicio automático")
+    s.add_argument("accion", nargs="?", choices=["encender", "apagar", "estado"], default="estado")
     s = sub.add_parser("duplicados", help="busca archivos idénticos repetidos")
     s.add_argument("carpeta", nargs="?", default="~/Documents")
     s.add_argument("--papelera", action="store_true", help="manda las copias sobrantes a la papelera")
@@ -684,6 +851,11 @@ def main(argv=None):
         corregir(a.archivo, a.carpeta, a.pista, a.todas)
     elif a.comando == "duplicados":
         duplicados(a.carpeta, a.papelera)
+    elif a.comando == "servicio":
+        if a.accion != "estado" and not cambiar_servicio(a.accion == "encender"):
+            sys.exit("No pude cambiar el servicio. ¿Ejecutaste ./instalar.sh?")
+        print("Servicio " + ("encendido: vigilando " + bonito(carpeta_descargas())
+                             if servicio_activo() else "apagado"))
 
 
 if __name__ == "__main__":

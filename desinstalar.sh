@@ -12,7 +12,9 @@ else
     rm -f "$UNITS/ordenito.path" "$UNITS/ordenito.service"
     systemctl --user daemon-reload
 fi
-rm -f "$HOME/.local/bin/ordenito"
+rm -f "$HOME/.local/bin/ordenito" "$HOME/.local/bin/ordenito-app"
+rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/ordenito" "$HOME/Applications/Ordenito.app"
+rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/ordenito.desktop"
 
 if [[ "${1:-}" == "--todo" ]]; then
     rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/ordenito" "${XDG_STATE_HOME:-$HOME/.local/state}/ordenito"

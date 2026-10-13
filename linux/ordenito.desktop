@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Ordenito
+GenericName=Organizador de descargas
+Comment=Ordena tus descargas solas y te deja corregir, revisar y quitar duplicados
+Exec=@APP_BIN@
+Icon=@ICONO@
+Terminal=false
+Categories=Utility;FileTools;
+Keywords=ordenar;descargas;carpetas;organizar;duplicados;downloads;organizer;
+StartupWMClass=Ordenito

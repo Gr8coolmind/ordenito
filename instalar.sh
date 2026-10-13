@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BIN="$HOME/.local/bin/ordenito"
+APP_BIN="$HOME/.local/bin/ordenito-app"
+DATOS="${XDG_DATA_HOME:-$HOME/.local/share}/ordenito"
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/ordenito/reglas.conf"
 ESTADO="${XDG_STATE_HOME:-$HOME/.local/state}/ordenito"
 DESCARGAS="$(xdg-user-dir DOWNLOAD 2>/dev/null || true)"
@@ -31,9 +33,64 @@ if ! command -v pdftotext >/dev/null; then
     fi
 fi
 
-mkdir -p "$(dirname "$BIN")" "$(dirname "$CONF")" "$ESTADO"
+mkdir -p "$(dirname "$BIN")" "$(dirname "$CONF")" "$ESTADO" "$DATOS"
 install -m 755 ordenito.py "$BIN"
 verde "✓ Programa:  $BIN"
+
+# ── La app (ventana con botones) necesita un Python con Tkinter 8.6 o más nuevo ──
+python_con_tk() {
+    for c in "$@"; do
+        if [[ -x "$c" ]] && "$c" -c 'import sys, tkinter; sys.exit(sys.version_info < (3, 9) or tkinter.TkVersion < 8.6)' 2>/dev/null; then
+            echo "$c"  # la ruta estable (enlace), no la de la versión exacta: sobrevive a actualizaciones
+            return 0
+        fi
+    done
+    return 1
+}
+CANDIDATOS=("$PYTHON")
+for d in /opt/homebrew/bin /usr/local/bin /Library/Frameworks/Python.framework/Versions/Current/bin \
+         /home/linuxbrew/.linuxbrew/bin "$HOME/.linuxbrew/bin" /usr/bin; do
+    for c in "$d"/python3 "$d"/python3.[0-9]*; do  # Homebrew puede tener varias versiones
+        case "$c" in *-config) continue ;; esac
+        CANDIDATOS+=("$c")
+    done
+done
+APP_PY="$(python_con_tk "${CANDIDATOS[@]}" || true)"
+install -m 644 ordenito.py ordenito_app.py ordenito.png ordenito.svg "$DATOS/"
+if [[ -n "$APP_PY" ]]; then
+    printf '#!/bin/sh\nexec "%s" -I "%s/ordenito_app.py" "$@"\n' "$APP_PY" "$DATOS" > "$APP_BIN"
+    chmod 755 "$APP_BIN"
+    if [[ "$SISTEMA" == Darwin ]]; then
+        APP="$HOME/Applications/Ordenito.app"
+        rm -rf "$APP"
+        mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+        sed "s|@VERSION@|$("$PYTHON" ordenito.py --version | cut -d' ' -f2)|" macos/Info.plist > "$APP/Contents/Info.plist"
+        printf '#!/bin/sh\nexec "%s"\n' "$APP_BIN" > "$APP/Contents/MacOS/Ordenito"
+        chmod 755 "$APP/Contents/MacOS/Ordenito"
+        ICONOS="$(mktemp -d)/ordenito.iconset"
+        mkdir -p "$ICONOS"
+        for t in 16 32 128 256; do
+            sips -z "$t" "$t" ordenito.png --out "$ICONOS/icon_${t}x${t}.png" >/dev/null 2>&1 || true
+        done
+        iconutil -c icns "$ICONOS" -o "$APP/Contents/Resources/ordenito.icns" 2>/dev/null || true
+        verde "✓ App:       $APP (ábrela desde Aplicaciones o Launchpad)"
+    else
+        LANZADORES="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+        mkdir -p "$LANZADORES"
+        sed -e "s|@APP_BIN@|$APP_BIN|" -e "s|@ICONO@|$DATOS/ordenito.png|" linux/ordenito.desktop \
+            > "$LANZADORES/ordenito.desktop"
+        command -v update-desktop-database >/dev/null && update-desktop-database "$LANZADORES" 2>/dev/null || true
+        verde "✓ App:       búscala como \"Ordenito\" en tu menú de aplicaciones (o ejecuta ordenito-app)"
+    fi
+else
+    if [[ "$SISTEMA" == Darwin ]]; then
+        aviso "· La app con ventana necesita Tkinter: 'brew install python-tk' y vuelve a ejecutar ./instalar.sh"
+    else
+        aviso "· La app con ventana necesita Tkinter: instala python3-tk (Ubuntu/Debian), python3-tkinter"
+        aviso "  (Fedora) o 'brew install python-tk' (Bazzite/Silverblue), y vuelve a ejecutar ./instalar.sh"
+    fi
+    aviso "  El servicio automático y el comando 'ordenito' funcionan igual sin ella."
+fi
 
 if [[ -f "$CONF" ]]; then
     verde "✓ Reglas:    $CONF (ya existían, no se tocan)"
@@ -77,6 +134,7 @@ fi
 cat <<FIN
 
 Listo. Todo lo que descargues se ordenará solo.
+  ordenito-app                abre la ventana de Ordenito
   ordenito simular            qué haría ahora mismo
   ordenito explicar ARCHIVO   por qué un archivo va a donde va
   ordenito deshacer           devuelve el último archivo movido
