@@ -413,8 +413,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__(className="Ordenito")  # enlaza la ventana con su ícono del menú
         self.title("Ordenito")
-        self.geometry("1040x660")
-        self.minsize(860, 520)
+        ancho = min(1040, self.winfo_screenwidth() - 60)
+        alto = min(660, self.winfo_screenheight() - 120)
+        self.geometry(f"{ancho}x{alto}")
+        self.minsize(min(860, ancho), min(520, alto))
         self.configure(bg=FONDO)
         self._estilos()
         self._icono()
@@ -466,8 +468,11 @@ class App(tk.Tk):
         s.configure("Suave.TLabel", foreground=TEXTO_SUAVE)
         s.configure("Estado.TLabel", foreground=TEXTO_SUAVE)
         s.configure("Logo.TLabel", font=(base[0], 22, "bold"), foreground="#111827")
-        s.configure("Acento.TButton", foreground="white", background=ACENTO, padding=(14, 6))
-        s.map("Acento.TButton", background=[("active", "#1d4ed8"), ("disabled", "#93c5fd")])
+        if o.MAC:  # en macOS los botones son nativos: no se puede cambiar su color de fondo
+            s.configure("Acento.TButton", font=(familia, 13, "bold"))
+        else:
+            s.configure("Acento.TButton", foreground="white", background=ACENTO, padding=(14, 6))
+            s.map("Acento.TButton", background=[("active", "#1d4ed8"), ("disabled", "#93c5fd")])
         s.configure("TButton", padding=(10, 5))
         s.configure("Treeview", rowheight=26, fieldbackground="white", background="white")
         s.configure("Treeview.Heading", font=(base[0], 10, "bold"))

@@ -22,7 +22,13 @@ if [[ -z "$PYTHON" ]] || ! "$PYTHON" -c 'import sys; sys.exit(sys.version_info <
     [[ "$SISTEMA" == Darwin ]] && echo "En Mac: ejecuta 'xcode-select --install' o 'brew install python'."
     exit 1
 fi
-# En Mac /usr/bin/python3 es un intermediario: usamos el ejecutable real (al que se le dan los permisos)
+# En Mac el servicio usa el Python de Apple si está: su ruta no cambia con 'brew upgrade', así el
+# permiso de Acceso total al disco no se pierde al actualizar Homebrew.
+if [[ "$SISTEMA" == Darwin ]] && xcode-select -p >/dev/null 2>&1 \
+        && /usr/bin/python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
+    PYTHON=/usr/bin/python3
+fi
+# /usr/bin/python3 es un intermediario: usamos el ejecutable real (al que se le dan los permisos)
 PYTHON="$("$PYTHON" -c 'import os, sys; print(os.path.realpath(sys.executable))')"
 
 if ! command -v pdftotext >/dev/null; then
@@ -79,7 +85,9 @@ if [[ -n "$APP_PY" ]]; then
         mkdir -p "$LANZADORES"
         sed -e "s|@APP_BIN@|$APP_BIN|" -e "s|@ICONO@|$DATOS/ordenito.png|" linux/ordenito.desktop \
             > "$LANZADORES/ordenito.desktop"
-        command -v update-desktop-database >/dev/null && update-desktop-database "$LANZADORES" 2>/dev/null || true
+        if command -v update-desktop-database >/dev/null; then
+            update-desktop-database "$LANZADORES" 2>/dev/null || true
+        fi
         verde "✓ App:       búscala como \"Ordenito\" en tu menú de aplicaciones (o ejecuta ordenito-app)"
     fi
 else

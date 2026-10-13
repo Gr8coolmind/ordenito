@@ -28,6 +28,10 @@ Ordenito lee el nombre *y el contenido* de cada archivo que descargas y lo lleva
 
 La mayoría de los organizadores solo miran la extensión: todos los PDF juntos, todas las imágenes juntas. **Ordenito lee lo que dice el documento.** Una tarea que menciona a tu profesora y el código de la materia va a la carpeta de esa materia, aunque se llame `documento(3).docx`.
 
+<p align="center"><img src="docs/app-descargas.png" alt="La app de Ordenito mostrando a dónde irá cada archivo de Descargas" width="820"></p>
+
+> 🍎 **¿Tienes Mac?** Sigue el **[tutorial paso a paso para macOS](docs/macos.md)**: está pensado para alguien que nunca ha usado la Terminal.
+
 ## ✨ Qué lo hace distinto
 
 | | |
@@ -37,12 +41,14 @@ La mayoría de los organizadores solo miran la extensión: todos los PDF juntos,
 | 🪪 **Reconoce al dueño del documento** | Lee el autor, el título, los encabezados y la portada. Si una tarea es *del* profesor de Seguridad, va a Seguridad, aunque hable mucho de redes. |
 | 🪆 **Entiende subcarpetas** | Si un archivo encaja en `Universidad` y también en `Universidad/Redes`, va a la más específica. |
 | 🃏 **Comodines** | `[*/Proyecto Final]` crea esa subcarpeta dentro de *cualquier* materia que gane. |
+| 🖱️ **App con botones** | Una ventana para ver qué se movió, deshacer, corregir, revisar carpetas, quitar duplicados y editar tus carpetas, sin tocar archivos de texto. Funciona igual en Linux y Mac. |
+| 🧭 **Carpetas recomendadas** | La primera vez, un asistente te pregunta qué quieres ordenar y cuáles son tus materias y profesores, y lo arma todo. |
 | 🔍 **Te explica sus decisiones** | `ordenito explicar archivo.pdf` muestra los puntos de cada carpeta y las palabras que coincidieron. |
 | 🎓 **Aprende de tus correcciones** | `ordenito corregir archivo carpeta` lo mueve a donde va y te ofrece aprender la pista que faltaba (el autor, el código de la materia, el docente). |
 | 👯 **Sin duplicados** | Si descargas algo que ya tenías, no guarda una copia `(1)`: la manda a la papelera y te avisa. `ordenito duplicados` encuentra las copias que ya tienes. |
 | ↩️ **Se puede deshacer** | `ordenito deshacer` devuelve el archivo, y Ordenito no lo vuelve a mover. |
 | 🔒 **100 % local** | No usa internet ni IA en la nube. Nada de tus documentos sale de tu computadora. |
-| 🪶 **Cero dependencias** | Un solo archivo de Python, solo con la biblioteca estándar. `pdftotext` es opcional. |
+| 🪶 **Cero dependencias** | Solo Python y su biblioteca estándar (la app usa Tkinter, que viene con Python). `pdftotext` es opcional. |
 
 ## 🚀 Instalación
 
@@ -53,20 +59,49 @@ cd ordenito
 ```
 
 No necesita `sudo` y funciona igual en **Linux** y **macOS**. El instalador:
-1. copia el programa a `~/.local/bin/ordenito`;
-2. crea tus reglas en `~/.config/ordenito/reglas.conf` (a partir del [ejemplo](reglas.ejemplo.conf));
-3. activa el servicio que vigila tu carpeta de descargas (la detecta sola, aunque tu sistema esté en español).
+1. copia el comando a `~/.local/bin/ordenito`;
+2. instala **la app**: "Ordenito" en tu menú de aplicaciones (Linux) u `Ordenito.app` en tu carpeta Aplicaciones (Mac);
+3. crea tus reglas en `~/.config/ordenito/reglas.conf` (a partir del [ejemplo](reglas.ejemplo.conf)). Si prefieres, ábrelas en la app y usa el asistente;
+4. activa el servicio que vigila tu carpeta de descargas (la detecta sola, aunque tu sistema esté en español).
+
+**Para la app con ventana** hace falta Tkinter, que casi siempre viene con Python. Si el instalador avisa que no lo encontró:
+
+| Sistema | Comando |
+|---|---|
+| Ubuntu / Debian / Mint | `sudo apt install python3-tk` |
+| Fedora | `sudo dnf install python3-tkinter` |
+| Arch / Manjaro | `sudo pacman -S tk` |
+| Bazzite / Silverblue (inmutables) | `brew install python-tk` |
+| macOS | `brew install python-tk` |
+
+Después vuelve a ejecutar `./instalar.sh`. Sin Tkinter, el servicio automático y el comando `ordenito` funcionan igual.
 
 > 💡 Para que lea los PDF instala `pdftotext`: `sudo dnf install poppler-utils` · `sudo apt install poppler-utils` · `sudo pacman -S poppler` · Mac: `brew install poppler`
 
-### 🍎 En Mac: un paso más
+### 🍎 En Mac
 
-macOS no deja que un programa en segundo plano lea tus Descargas o Documentos sin permiso. El instalador abre el panel correcto y te muestra la ruta de Python. Solo tienes que:
+Hay un paso extra: macOS no deja que un programa en segundo plano lea tus Descargas o Documentos sin permiso, así que hay que darle **Acceso total al disco** a Python (una sola vez). Todo está explicado con detalle en el **[tutorial para macOS](docs/macos.md)**: Homebrew, instalación, el permiso, la app, cómo ordenar lo que ya tienes y qué hacer si algo falla.
 
-1. **Ajustes del Sistema → Privacidad y seguridad → Acceso total al disco**
-2. Pulsar **+**, luego **Cmd + Shift + G**, pegar la ruta de Python que mostró el instalador y activar el interruptor.
+## 🖱️ La app
 
-Si Python no está instalado, el instalador te dirá cómo instalarlo (`xcode-select --install` o `brew install python`). En Mac, los videos van a la carpeta **Películas** (`Movies`).
+Ábrela desde tu menú de aplicaciones o con `ordenito-app`.
+
+| Pestaña | Para qué sirve |
+|---|---|
+| **Actividad** | Lo último que se movió. **Deshacer**, **Corregir…** (lo mueves y Ordenito aprende), **¿Por qué fue aquí?** y **Abrir carpeta**. |
+| **En Descargas** | Lo que hay en Descargas y a dónde iría cada archivo, con las pistas que lo deciden. **Mover a…** para enseñarle. |
+| **Carpetas** | Tus carpetas y sus pistas, con formularios para crear, editar o quitar. Incluye **Carpetas recomendadas…** |
+| **Revisar** | Elige una carpeta y te muestra qué archivos estarían mejor en otro lugar. Puedes moverlos con un clic. |
+| **Duplicados** | Copias idénticas (compara el contenido, no el nombre). Las sobrantes van a la papelera. |
+
+Arriba están **Ordenar automáticamente** (enciende o pausa el servicio) y **Ordenar ahora**.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/app-asistente.png" alt="Asistente de carpetas recomendadas"><br><sub>La primera vez: carpetas recomendadas, materias y profesores.</sub></td>
+<td width="50%"><img src="docs/app-actividad.png" alt="Pestaña Actividad"><br><sub>Actividad: deshacer, corregir y ver por qué.</sub></td>
+</tr>
+</table>
 
 ## 🧭 Cómo decide
 
@@ -135,6 +170,8 @@ El [archivo de ejemplo](reglas.ejemplo.conf) trae categorías listas para estudi
 | `ordenito historial [N]` | Muestra los últimos movimientos. |
 | `ordenito deshacer [N]` | Devuelve a su lugar los últimos N archivos movidos (también los que fueron a la papelera). |
 | `ordenito corregir ARCHIVO CARPETA` | Mueve un archivo mal clasificado y aprende la pista que faltaba. `--todas` acepta todas las sugerencias y `--pista TEXTO` agrega una a mano. |
+| `ordenito-app` | Abre la app con ventana. |
+| `ordenito servicio [encender\|apagar]` | Enciende, pausa o muestra el servicio automático. |
 | `ordenito duplicados [CARPETA]` | Lista archivos idénticos (compara el contenido, no el nombre). Con `--papelera` quita las copias y se queda con el nombre más limpio. |
 
 ```console
@@ -179,7 +216,7 @@ Tu nombre y el de tus compañeros salen en todos tus trabajos, así que no sirve
 python3 -m unittest discover -s tests -v
 ```
 
-Las pruebas cubren la puntuación, las pistas fuertes (autor, encabezado y menciones de pasada), `corregir`, los duplicados, las rutas con enlaces de Silverblue, las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13 en Linux y en macOS, y en un Mac real se prueba de punta a punta: instalar, descargar un archivo y comprobar que se ordena solo.
+Las pruebas cubren la app (con una pantalla virtual), la puntuación, las pistas fuertes (autor, encabezado y menciones de pasada), `corregir`, los duplicados, las rutas con enlaces de Silverblue, las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13 en Linux y en macOS, y en un Mac real se prueba de punta a punta: instalar, descargar un archivo, comprobar que se ordena solo y abrir `Ordenito.app`.
 
 ## 🗑️ Desinstalar
 
@@ -221,7 +258,7 @@ Usa `ordenito corregir ARCHIVO CARPETA_CORRECTA`. Lo mueve y te ofrece aprender 
 <details>
 <summary>🇬🇧 <b>English</b></summary>
 
-**Ordenito** auto-sorts your Downloads folder on Linux and macOS. Instead of sorting only by file extension, it reads each file's **name and content** (docx, pptx, xlsx, odt, pdf, text, code, and the file names inside zips) and scores it against simple keyword rules. A systemd path unit (Linux) or launchd agent (macOS) triggers it instantly whenever a download finishes. It supports nested folders (the most specific one wins), wildcard subfolders such as `[*/Final Project]`, per-extension rules, type-based fallbacks, `explain`/`review`/`history`/`undo` commands, and runs 100% locally with zero dependencies. Install with `./instalar.sh`. The CLI and docs are in Spanish.
+**Ordenito** auto-sorts your Downloads folder on Linux and macOS, with a Tkinter desktop app (activity, undo, correct-and-learn, review, duplicates, rule editor and a recommended-folders wizard). Instead of sorting only by file extension, it reads each file's **name and content** (docx, pptx, xlsx, odt, pdf, text, code, and the file names inside zips) and scores it against simple keyword rules. A systemd path unit (Linux) or launchd agent (macOS) triggers it instantly whenever a download finishes. It supports nested folders (the most specific one wins), wildcard subfolders such as `[*/Final Project]`, per-extension rules, type-based fallbacks, `explain`/`review`/`history`/`undo` commands, and runs 100% locally with zero dependencies. Install with `./instalar.sh`. The CLI and docs are in Spanish.
 </details>
 
 <div align="center">
