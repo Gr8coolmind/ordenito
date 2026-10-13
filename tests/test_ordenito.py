@@ -24,7 +24,12 @@ red-1010, ana perez, subnetting, vlan, enrutamiento, router
 tienda aurora, maqueta
 
 [Docs/Uni/Seguridad]
+fuertes: carlos ruiz
 red-1015, malware, any.run
+
+[Docs/Trabajo]
+fuertes: acme srl
+pasante, reporte diario
 
 [Docs/Uni/Ingles]
 english, grammar
@@ -47,10 +52,14 @@ extensiones: flatpakref, rpm
 """
 
 
-def docx(ruta, texto):
-    """Crea un .docx mínimo con ese texto."""
+def docx(ruta, texto, autor="", encabezado=""):
+    """Crea un .docx mínimo con ese texto (y opcionalmente autor y encabezado)."""
     with zipfile.ZipFile(ruta, "w") as z:
         z.writestr("word/document.xml", f"<w:document><w:body><w:p><w:t>{texto}</w:t></w:p></w:body></w:document>")
+        if autor:
+            z.writestr("docProps/core.xml", f"<cp:coreProperties><dc:creator>{autor}</dc:creator></cp:coreProperties>")
+        if encabezado:
+            z.writestr("word/header1.xml", f"<w:hdr><w:p><w:t>{encabezado}</w:t></w:p></w:hdr>")
     return ruta
 
 
@@ -143,6 +152,22 @@ class TestClasificar(Base):
 
     def test_una_sola_mencion_no_basta(self):
         self.assertIsNone(self.destino("notas.txt", "hablamos de una vlan"))
+
+    def test_pista_fuerte_en_autor_gana_a_palabras_de_tema(self):
+        # El tema dice "redes" muchas veces, pero el autor del documento es el profesor de Seguridad
+        f = docx(self.dl / "caso.docx", "subnetting vlan enrutamiento router " * 5, autor="Carlos Ruiz")
+        self.assertEqual(ordenito.clasificar(f, self.reglas).destino, "Docs/Uni/Seguridad")
+
+    def test_pista_fuerte_en_encabezado(self):
+        f = docx(self.dl / "guia.docx", "subnetting vlan", encabezado="Prof. Carlos Ruiz")
+        self.assertEqual(ordenito.clasificar(f, self.reglas).destino, "Docs/Uni/Seguridad")
+
+    def test_pista_fuerte_de_pasada_pesa_poco(self):
+        # Mencionar la empresa al final de una tarea de redes no la convierte en documento de trabajo
+        texto = "Tarea de subnetting y vlan con router. " + "relleno " * 400 + "Lo usaré en Acme SRL."
+        res = ordenito.clasificar(self.archivo("reflexion.txt", texto), self.reglas)
+        self.assertEqual(res.destino, "Docs/Uni/Redes")
+        self.assertEqual(res.tabla["Docs/Trabajo"][0], ordenito.PESO_FUERTE_CUERPO)
 
     def test_zip_bomb_no_revienta(self):
         ruta = self.dl / "bomba.docx"

@@ -33,6 +33,7 @@ La mayoría de los organizadores solo miran la extensión: todos los PDF juntos,
 |---|---|
 | 🧠 **Lee el contenido** | Word, PowerPoint, Excel, LibreOffice, PDF, texto, código… y hasta los nombres de lo que trae un `.zip` (sin descomprimirlo). |
 | ⚡ **Al instante** | Un servicio de systemd vigila tu carpeta de descargas. Unos 2 segundos después de terminar una descarga, el archivo ya está en su lugar. |
+| 🪪 **Reconoce al dueño del documento** | Lee el autor, el título, los encabezados y la portada. Si una tarea es *del* profesor de Seguridad, va a Seguridad, aunque hable mucho de redes. |
 | 🪆 **Entiende subcarpetas** | Si un archivo encaja en `Universidad` y también en `Universidad/Redes`, va a la más específica. |
 | 🃏 **Comodines** | `[*/Proyecto Final]` crea esa subcarpeta dentro de *cualquier* materia que gane. |
 | 🔍 **Te explica sus decisiones** | `ordenito explicar archivo.pdf` muestra los puntos de cada carpeta y las palabras que coincidieron. |
@@ -72,6 +73,7 @@ flowchart LR
     H --> J
 ```
 
+- Una pista **fuerte** (profesor, código de materia, empresa, cliente) vale **25 puntos** si aparece en el nombre, el autor, el encabezado o la portada, y **3** si solo se menciona de pasada en el cuerpo.
 - Cada palabra clave en el **nombre** del archivo vale **10 puntos**.
 - En el **contenido**, cada aparición vale **1 punto** (máximo 5 por palabra, así ninguna repetida gana sola).
 - Las palabras se comparan **completas**, sin importar mayúsculas, tildes, guiones ni guiones bajos: `curso` no coincide dentro de `recurso`.
@@ -85,7 +87,8 @@ Las reglas se escriben en un archivo de texto muy simple, `~/.config/ordenito/re
 # palabras clave separadas por coma
 
 [Documents/Universidad/Redes]
-red-1010, prof. ana perez, subnetting, vlan, cisco packet tracer
+fuertes: red-1010, ana perez          # identidad: código y profesor
+subnetting, vlan, cisco packet tracer # temas
 
 # Comodín: dentro de cualquier materia, si menciona "proyecto final"
 [*/Proyecto Final]
@@ -102,7 +105,7 @@ extensiones: mp4, mkv, webm
 ```
 
 **Consejos para buenas reglas**
-- Las mejores pistas son **únicas**: el nombre del profesor, el código de la materia, el nombre del cliente o de la empresa.
+- Las mejores pistas son **únicas**: el nombre del profesor, el código de la materia, el nombre del cliente o de la empresa. Ponlas en `fuertes:` y escríbelas como salen en los documentos.
 - Evita palabras que salen en todo (tu carrera, tu universidad): no ayudan a distinguir.
 - Si dos materias comparten prefijo (`MAT-101-01` y `MAT-101-02`), usa el código **completo**.
 - Después de editar, comprueba con `ordenito explicar` y `ordenito revisar`.
@@ -146,7 +149,7 @@ Tarea3_redes.docx
 python3 -m unittest discover -s tests -v
 ```
 
-Las pruebas cubren la puntuación, las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13.
+Las pruebas cubren la puntuación, las pistas fuertes (autor, encabezado y menciones de pasada), las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13.
 
 ## 🗑️ Desinstalar
 

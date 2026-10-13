@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 HOME = Path.home()
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "ordenito" / "reglas.conf"
@@ -36,6 +36,9 @@ OFIMATICA = {".docx", ".pptx", ".xlsx", ".odt", ".odp", ".ods"}
 TEXTO = {".txt", ".md", ".csv", ".pine", ".php", ".js", ".ts", ".py", ".sh", ".sql",
          ".html", ".css", ".json"}
 PESO_NOMBRE = 10      # una palabra clave en el nombre vale como 10 en el contenido
+PESO_FUERTE = 25      # pista 'fuertes:' (profesor, código, cliente) en nombre, autor, encabezado o portada
+PESO_FUERTE_CUERPO = 3  # la misma pista mencionada de pasada en el cuerpo
+PORTADA = 1500        # caracteres iniciales que cuentan como portada (metadatos y encabezados van primero)
 MINIMO = 2            # puntos mínimos para que un tema cuente
 MAX_POR_PALABRA = 5   # una palabra repetida 100 veces no debe ganar sola
 MAX_TEXTO = 50_000    # caracteres de contenido que se analizan
@@ -48,6 +51,7 @@ MAX_MIEMBRO = 2_000_000  # bytes leídos de cada parte de un zip (protege de zip
 class Regla:
     destino: str
     palabras: list = field(default_factory=list)
+    fuertes: list = field(default_factory=list)
     extensiones: set = field(default_factory=set)
 
     @property
@@ -58,7 +62,7 @@ class Regla:
     @property
     def respaldo(self):
         """Bloque con solo 'extensiones:': clasifica por tipo si ningún tema coincidió."""
-        return not self.palabras
+        return not self.palabras and not self.fuertes
 
 
 def leer_reglas(ruta=None):
@@ -75,6 +79,8 @@ def leer_reglas(ruta=None):
             reglas.append(Regla(linea[1:-1].strip()))
         elif not reglas:
             sys.exit(f"{ruta}:{n}: hay palabras antes del primer [destino].")
+        elif linea.lower().startswith("fuertes:"):
+            reglas[-1].fuertes.extend(normalizar(p).strip() for p in linea.split(":", 1)[1].split(",") if p.strip())
         elif linea.lower().startswith("extensiones:"):
             reglas[-1].extensiones.update(
                 "." + e.strip().lstrip(".").lower()
@@ -99,17 +105,26 @@ def contenido(f):
     try:
         if ext in OFIMATICA:
             with zipfile.ZipFile(f) as z:
-                partes = [n for n in z.namelist() if n == "content.xml" or re.match(
+                nombres = z.namelist()
+                # Primero autor/título y encabezados: ahí suele estar el profesor o la empresa
+                partes = [n for n in nombres if n in ("docProps/core.xml", "meta.xml")
+                          or re.match(r"word/(header|footer)\d*\.xml$", n)]
+                partes += [n for n in nombres if n == "content.xml" or re.match(
                     r"(word/document|ppt/slides/slide\d+|xl/sharedStrings)\.xml$", n)]
-                xml = " ".join(_leer_miembro(z, n) for n in partes[:40])
+                xml = " ".join(_leer_miembro(z, n) for n in partes[:50])
             return re.sub(r"<[^>]+>", " ", xml)
         if ext == ".zip":
             with zipfile.ZipFile(f) as z:
                 return " ".join(Path(n).name for n in z.namelist()[:500])
         if ext == ".pdf" and shutil.which("pdftotext"):
+            meta = ""
+            if shutil.which("pdfinfo"):
+                info = subprocess.run(["pdfinfo", "--", str(f)], capture_output=True, text=True, timeout=10)
+                meta = " ".join(l.split(":", 1)[1] for l in info.stdout.splitlines()
+                                if l.startswith(("Title:", "Author:", "Subject:", "Keywords:")))
             r = subprocess.run(["pdftotext", "-l", "5", "--", str(f), "-"],
                                capture_output=True, text=True, timeout=20)
-            return r.stdout
+            return meta + " " + r.stdout
         if ext in TEXTO:
             with f.open(encoding="utf-8", errors="ignore") as t:
                 return t.read(MAX_TEXTO)
@@ -130,8 +145,15 @@ def contar(palabra, texto):
     return len(re.findall(r"(?<!\w)" + re.escape(palabra) + r"(?!\w)", texto))
 
 
-def puntuar(palabras, nombre, texto):
+def puntuar(palabras, nombre, texto, fuertes=()):
     puntos, pistas = 0, []
+    for p in fuertes:
+        if contar(p, nombre) or contar(p, texto[:PORTADA]):
+            puntos += PESO_FUERTE
+            pistas.append(f"{p} ★")
+        elif contar(p, texto):
+            puntos += PESO_FUERTE_CUERPO
+            pistas.append(f"{p} ☆ (de pasada)")
     for p in palabras:
         if contar(p, nombre):
             puntos += PESO_NOMBRE
@@ -163,7 +185,7 @@ def clasificar(f, reglas):
         elif r.comodin:
             comodines.append(r)
         else:
-            puntos, pistas = puntuar(r.palabras, nombre, texto)
+            puntos, pistas = puntuar(r.palabras, nombre, texto, r.fuertes)
             if puntos:
                 tabla[r.destino] = (puntos, pistas)
 
@@ -188,7 +210,7 @@ def clasificar(f, reglas):
         sub = r.destino[2:]
         if mejor.endswith("/" + sub):
             break
-        extra, pistas = puntuar(r.palabras, nombre, texto)
+        extra, pistas = puntuar(r.palabras, nombre, texto, r.fuertes)
         if extra:
             tabla[r.destino] = (extra, pistas)
             return Resultado(f"{mejor}/{sub}", puntos, f"dentro del tema: {', '.join(pistas)}", tabla)
