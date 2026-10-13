@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Ordenito para macOS: launchd ejecuta 'ordenito ordenar' cada vez que cambia la carpeta de descargas -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gr8coolmind.ordenito</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@PYTHON@</string>
+        <string>-I</string>
+        <string>@BIN@</string>
+        <string>ordenar</string>
+    </array>
+    <key>WatchPaths</key>
+    <array>
+        <string>@DESCARGAS@</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>3</integer>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>@LOG@</string>
+</dict>
+</plist>

@@ -8,6 +8,7 @@ Ordenito lee el nombre *y el contenido* de cada archivo que descargas y lo lleva
 [![Pruebas](https://github.com/Gr8coolmind/ordenito/actions/workflows/pruebas.yml/badge.svg)](https://github.com/Gr8coolmind/ordenito/actions/workflows/pruebas.yml)
 ![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-systemd-FCC624?logo=linux&logoColor=black)
+![macOS](https://img.shields.io/badge/macOS-launchd-000000?logo=apple&logoColor=white)
 ![Sin dependencias](https://img.shields.io/badge/dependencias-0-success)
 [![Licencia MIT](https://img.shields.io/badge/licencia-MIT-blue)](LICENSE)
 
@@ -32,7 +33,7 @@ La mayoría de los organizadores solo miran la extensión: todos los PDF juntos,
 | | |
 |---|---|
 | 🧠 **Lee el contenido** | Word, PowerPoint, Excel, LibreOffice, PDF, texto, código… y hasta los nombres de lo que trae un `.zip` (sin descomprimirlo). |
-| ⚡ **Al instante** | Un servicio de systemd vigila tu carpeta de descargas. Unos 2 segundos después de terminar una descarga, el archivo ya está en su lugar. |
+| ⚡ **Al instante** | Un servicio (systemd en Linux, launchd en Mac) vigila tu carpeta de descargas. Unos 2 segundos después de terminar una descarga, el archivo ya está en su lugar. |
 | 🪪 **Reconoce al dueño del documento** | Lee el autor, el título, los encabezados y la portada. Si una tarea es *del* profesor de Seguridad, va a Seguridad, aunque hable mucho de redes. |
 | 🪆 **Entiende subcarpetas** | Si un archivo encaja en `Universidad` y también en `Universidad/Redes`, va a la más específica. |
 | 🃏 **Comodines** | `[*/Proyecto Final]` crea esa subcarpeta dentro de *cualquier* materia que gane. |
@@ -51,12 +52,21 @@ cd ordenito
 ./instalar.sh
 ```
 
-No necesita `sudo`. El instalador:
+No necesita `sudo` y funciona igual en **Linux** y **macOS**. El instalador:
 1. copia el programa a `~/.local/bin/ordenito`;
 2. crea tus reglas en `~/.config/ordenito/reglas.conf` (a partir del [ejemplo](reglas.ejemplo.conf));
 3. activa el servicio que vigila tu carpeta de descargas (la detecta sola, aunque tu sistema esté en español).
 
-> 💡 Para que lea los PDF instala `pdftotext`: `sudo dnf install poppler-utils` · `sudo apt install poppler-utils` · `sudo pacman -S poppler`
+> 💡 Para que lea los PDF instala `pdftotext`: `sudo dnf install poppler-utils` · `sudo apt install poppler-utils` · `sudo pacman -S poppler` · Mac: `brew install poppler`
+
+### 🍎 En Mac: un paso más
+
+macOS no deja que un programa en segundo plano lea tus Descargas o Documentos sin permiso. El instalador abre el panel correcto y te muestra la ruta de Python. Solo tienes que:
+
+1. **Ajustes del Sistema → Privacidad y seguridad → Acceso total al disco**
+2. Pulsar **+**, luego **Cmd + Shift + G**, pegar la ruta de Python que mostró el instalador y activar el interruptor.
+
+Si Python no está instalado, el instalador te dirá cómo instalarlo (`xcode-select --install` o `brew install python`). En Mac, los videos van a la carpeta **Películas** (`Movies`).
 
 ## 🧭 Cómo decide
 
@@ -169,7 +179,7 @@ Tu nombre y el de tus compañeros salen en todos tus trabajos, así que no sirve
 python3 -m unittest discover -s tests -v
 ```
 
-Las pruebas cubren la puntuación, las pistas fuertes (autor, encabezado y menciones de pasada), `corregir`, los duplicados, las rutas con enlaces de Silverblue, las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13.
+Las pruebas cubren la puntuación, las pistas fuertes (autor, encabezado y menciones de pasada), `corregir`, los duplicados, las rutas con enlaces de Silverblue, las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13 en Linux y en macOS, y en un Mac real se prueba de punta a punta: instalar, descargar un archivo y comprobar que se ordena solo.
 
 ## 🗑️ Desinstalar
 
@@ -183,9 +193,9 @@ Tus archivos se quedan donde Ordenito los dejó.
 ## ❓ Preguntas frecuentes
 
 <details>
-<summary><b>¿Funciona fuera de GNOME?</b></summary>
+<summary><b>¿En qué sistemas funciona?</b></summary>
 
-Sí. Solo necesita Linux con systemd (Fedora, Ubuntu, Debian, Arch, Bazzite, Silverblue…). Las notificaciones usan `notify-send`, y si no está, simplemente no avisa.
+En **macOS** (Intel y Apple Silicon) y en cualquier **Linux con systemd** (Fedora, Ubuntu, Debian, Arch, Bazzite, Silverblue…), con cualquier escritorio. En Linux, las notificaciones usan `notify-send`; en Mac, el centro de notificaciones. En cada cambio se prueba en Linux y en un Mac real, incluida la instalación con launchd.
 </details>
 
 <details>
@@ -211,7 +221,7 @@ Usa `ordenito corregir ARCHIVO CARPETA_CORRECTA`. Lo mueve y te ofrece aprender 
 <details>
 <summary>🇬🇧 <b>English</b></summary>
 
-**Ordenito** auto-sorts your Downloads folder on Linux. Instead of sorting only by file extension, it reads each file's **name and content** (docx, pptx, xlsx, odt, pdf, text, code, and the file names inside zips) and scores it against simple keyword rules. A systemd path unit triggers it instantly whenever a download finishes. It supports nested folders (the most specific one wins), wildcard subfolders such as `[*/Final Project]`, per-extension rules, type-based fallbacks, `explain`/`review`/`history`/`undo` commands, and runs 100% locally with zero dependencies. Install with `./instalar.sh`. The CLI and docs are in Spanish.
+**Ordenito** auto-sorts your Downloads folder on Linux and macOS. Instead of sorting only by file extension, it reads each file's **name and content** (docx, pptx, xlsx, odt, pdf, text, code, and the file names inside zips) and scores it against simple keyword rules. A systemd path unit (Linux) or launchd agent (macOS) triggers it instantly whenever a download finishes. It supports nested folders (the most specific one wins), wildcard subfolders such as `[*/Final Project]`, per-extension rules, type-based fallbacks, `explain`/`review`/`history`/`undo` commands, and runs 100% locally with zero dependencies. Install with `./instalar.sh`. The CLI and docs are in Spanish.
 </details>
 
 <div align="center">

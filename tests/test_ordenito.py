@@ -254,9 +254,9 @@ class TestDuplicados(Base):
         self.archivo("foto (1).jpg", "misma foto")
         self.ordenar()
         self.assertEqual(sorted(f.name for f in fotos.iterdir()), ["foto.jpg"], "no debe crear copias")
-        papelera = self.home / "share" / "Trash"
-        self.assertTrue((papelera / "files" / "foto (1).jpg").exists())
-        self.assertTrue((papelera / "info" / "foto (1).jpg.trashinfo").exists())
+        self.assertTrue((ordenito.cesto() / "foto (1).jpg").exists())
+        if not ordenito.MAC:
+            self.assertTrue((ordenito.papelera() / "info" / "foto (1).jpg.trashinfo").exists())
 
     def test_mismo_nombre_distinto_contenido_no_es_duplicado(self):
         fotos = self.home / "Fotos"
@@ -275,7 +275,9 @@ class TestDuplicados(Base):
         with redirect_stdout(io.StringIO()):
             ordenito.deshacer(1)
         self.assertTrue((self.dl / "otra.jpg").exists())
-        self.assertFalse(any((self.home / "share" / "Trash" / "info").iterdir()))
+        self.assertFalse(any(ordenito.cesto().iterdir()))
+        if not ordenito.MAC:
+            self.assertFalse(any((ordenito.papelera() / "info").iterdir()))
 
     def test_comando_duplicados_conserva_el_nombre_limpio(self):
         docs = self.home / "Docs"

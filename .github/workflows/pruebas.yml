@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  pruebas:
+  linux:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -18,8 +18,45 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -y -q poppler-utils shellcheck
       - run: python -m unittest discover -s tests -v
       - run: shellcheck instalar.sh desinstalar.sh
-      - name: Las reglas de ejemplo se leen bien
+      - name: Instalador (sin servicio) y reglas de ejemplo
         run: |
-          mkdir -p ~/.config/ordenito ~/Downloads
-          cp reglas.ejemplo.conf ~/.config/ordenito/reglas.conf
-          ORDENITO_CARPETA=~/Downloads python ordenito.py simular
+          ORDENITO_SIN_SERVICIO=1 ./instalar.sh
+          ~/.local/bin/ordenito --version
+          mkdir -p ~/Downloads && ~/.local/bin/ordenito simular
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -v
+
+  macos-de-punta-a-punta:
+    # Instala de verdad con launchd y comprueba que una descarga se ordena sola
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar
+        run: ./instalar.sh
+      - name: El plist generado es válido
+        run: plutil -lint ~/Library/LaunchAgents/com.gr8coolmind.ordenito.plist
+      - name: Una descarga se ordena sola
+        run: |
+          mkdir -p ~/Downloads
+          printf 'Factura\nComprobante de pago\n' > ~/Downloads/factura_prueba.txt
+          for i in $(seq 1 30); do
+            [ -e ~/Documents/Personal/Finanzas/factura_prueba.txt ] && { echo "✓ ordenada por launchd"; exit 0; }
+            sleep 2
+          done
+          echo "No se movió. Diagnóstico:"
+          launchctl print "gui/$(id -u)/com.gr8coolmind.ordenito" | head -40 || true
+          cat ~/.local/state/ordenito/errores.log || true
+          ls -la ~/Downloads
+          exit 1
+      - name: Desinstalar
+        run: ./desinstalar.sh && test ! -e ~/Library/LaunchAgents/com.gr8coolmind.ordenito.plist

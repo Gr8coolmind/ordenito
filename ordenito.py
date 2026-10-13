@@ -29,9 +29,10 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 HOME = Path.home()
+MAC = sys.platform == "darwin"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "ordenito" / "reglas.conf"
 ESTADO = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local" / "state")) / "ordenito"
 
@@ -310,18 +311,25 @@ def _registrar(desde, hacia, puntos=0, **extra):
 
 
 def papelera():
+    if MAC:
+        return HOME / ".Trash"
     return Path(os.environ.get("XDG_DATA_HOME", HOME / ".local" / "share")) / "Trash"
 
 
+def cesto():
+    """Carpeta donde quedan los archivos tirados (en Linux, Trash/files)."""
+    return papelera() if MAC else papelera() / "files"
+
+
 def a_papelera(f):
-    """Manda a la papelera (estándar freedesktop): se puede restaurar desde Archivos."""
-    t = papelera()
-    (t / "files").mkdir(parents=True, exist_ok=True)
-    (t / "info").mkdir(parents=True, exist_ok=True)
-    destino = libre(t / "files", f.name)
-    (t / "info" / f"{destino.name}.trashinfo").write_text(
-        f"[Trash Info]\nPath={quote(str(f.resolve()))}\n"
-        f"DeletionDate={datetime.now():%Y-%m-%dT%H:%M:%S}\n")
+    """Manda a la papelera del sistema: se puede restaurar desde Archivos/Finder o con 'deshacer'."""
+    cesto().mkdir(parents=True, exist_ok=True)
+    destino = libre(cesto(), f.name)
+    if not MAC:  # estándar freedesktop: el gestor de archivos sabe de dónde vino
+        (papelera() / "info").mkdir(parents=True, exist_ok=True)
+        (papelera() / "info" / f"{destino.name}.trashinfo").write_text(
+            f"[Trash Info]\nPath={quote(str(f.resolve()))}\n"
+            f"DeletionDate={datetime.now():%Y-%m-%dT%H:%M:%S}\n")
     shutil.move(str(f), str(destino))
     return destino
 
@@ -347,7 +355,11 @@ def gemelo(f, carpeta):
 
 
 def notificar(titulo, cuerpo):
-    if shutil.which("notify-send"):
+    if MAC:  # los textos van como argumentos, nunca dentro del script
+        subprocess.run(["osascript", "-e", "on run argv", "-e",
+                        'display notification (item 2 of argv) with title "Ordenito" subtitle (item 1 of argv)',
+                        "-e", "end run", titulo, cuerpo.replace("\n", " ")], check=False)
+    elif shutil.which("notify-send"):
         subprocess.run(["notify-send", "-a", "Ordenito", "-i", "folder-documents", titulo, cuerpo],
                        check=False)
 
@@ -411,7 +423,7 @@ def deshacer(n=1):
         vuelta = libre(origen.parent, origen.name)
         origen.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(actual), str(vuelta))
-        if actual.is_relative_to(papelera() / "files"):
+        if not MAC and actual.is_relative_to(cesto()):
             (papelera() / "info" / f"{actual.name}.trashinfo").unlink(missing_ok=True)
         ignorados.add(vuelta.name)  # para que el servicio no lo vuelva a mover
         print(f"  ↩ {vuelta.name}  →  {bonito(vuelta.parent)}")

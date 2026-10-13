@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Quita Ordenito. Tus reglas y el historial se conservan salvo que pases --todo.
+# Quita Ordenito (Linux o macOS). Tus reglas y el historial se conservan salvo que pases --todo.
 set -euo pipefail
-UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
-systemctl --user disable --now ordenito.path 2>/dev/null || true
-rm -f "$UNITS/ordenito.path" "$UNITS/ordenito.service" "$HOME/.local/bin/ordenito"
-systemctl --user daemon-reload
+if [[ "$(uname -s)" == Darwin ]]; then
+    PLIST="$HOME/Library/LaunchAgents/com.gr8coolmind.ordenito.plist"
+    launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+    rm -f "$PLIST"
+else
+    UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    systemctl --user disable --now ordenito.path 2>/dev/null || true
+    rm -f "$UNITS/ordenito.path" "$UNITS/ordenito.service"
+    systemctl --user daemon-reload
+fi
+rm -f "$HOME/.local/bin/ordenito"
 
 if [[ "${1:-}" == "--todo" ]]; then
     rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/ordenito" "${XDG_STATE_HOME:-$HOME/.local/state}/ordenito"
