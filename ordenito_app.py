@@ -4,6 +4,7 @@
 Usa el mismo motor que el comando 'ordenito'. Requiere Tkinter (viene con Python;
 en algunas distribuciones se instala aparte: python3-tk / python3-tkinter / brew python-tk).
 """
+import gc
 import importlib.machinery
 import importlib.util
 import queue
@@ -648,6 +649,9 @@ class App(tk.Tk):
         self.trabajos += 1
         if self.trabajos == 1:
             self.after(100, self._revisar_cola)
+        # Las variables de Tk de ventanas ya cerradas deben liberarse en este hilo: si el recolector
+        # las encuentra dentro del hilo de trabajo, cada una lo frena esperando a la ventana principal.
+        gc.collect()
         threading.Thread(target=hilo, daemon=True).start()
 
     def _revisar_cola(self):

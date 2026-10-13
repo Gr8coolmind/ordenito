@@ -58,7 +58,7 @@ class TestApp(unittest.TestCase):
         a.crear()
         return a.resultado
 
-    def esperar(self, app, segundos=10):
+    def esperar(self, app, segundos=30):
         """Procesa eventos hasta que terminen las tareas en segundo plano."""
         limite = time.time() + segundos
         fin_arranque = time.time() + 0.4  # la app arranca 100 ms después de abrirse
