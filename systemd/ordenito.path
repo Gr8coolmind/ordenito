@@ -1,0 +1,11 @@
+[Unit]
+Description=Ordenito: vigila Descargas para ordenarlas al instante
+Documentation=https://github.com/Gr8coolmind/ordenito
+
+[Path]
+PathChanged=@DESCARGAS@
+TriggerLimitIntervalSec=10
+TriggerLimitBurst=20
+
+[Install]
+WantedBy=default.target

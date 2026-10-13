@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# Tus reglas personales viven en ~/.config/ordenito y nunca deben subirse
+reglas.conf

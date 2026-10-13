@@ -1,0 +1,9 @@
+[Unit]
+Description=Ordenito: ordena las descargas según ~/.config/ordenito/reglas.conf
+Documentation=https://github.com/Gr8coolmind/ordenito
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env python3 -I %h/.local/bin/ordenito ordenar
+Nice=10
+IOSchedulingClass=idle

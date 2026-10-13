@@ -1,0 +1,224 @@
+"""Pruebas de Ordenito. Ejecutar con:  python3 -m unittest discover -s tests -v"""
+import importlib.util
+import io
+import os
+import sys
+import tempfile
+import unittest
+import zipfile
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+RAIZ = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("ordenito", RAIZ / "ordenito.py")
+ordenito = importlib.util.module_from_spec(_spec)
+sys.modules["ordenito"] = ordenito  # dataclasses lo necesita registrado
+_spec.loader.exec_module(ordenito)
+
+REGLAS = """
+[Docs/Uni/Redes]
+red-1010, ana perez, subnetting, vlan, enrutamiento, router
+
+[Docs/Uni/Redes/Proyecto Final]
+tienda aurora, maqueta
+
+[Docs/Uni/Seguridad]
+red-1015, malware, any.run
+
+[Docs/Uni/Ingles]
+english, grammar
+
+[Docs/Cursos]
+curso, coursera
+
+[Docs/Codigo]
+extensiones: php, zip
+lms, action.php
+
+[*/Proyecto Final]
+proyecto final, entrega final
+
+[Fotos]
+extensiones: jpg, png
+
+[Instaladores]
+extensiones: flatpakref, rpm
+"""
+
+
+def docx(ruta, texto):
+    """Crea un .docx mínimo con ese texto."""
+    with zipfile.ZipFile(ruta, "w") as z:
+        z.writestr("word/document.xml", f"<w:document><w:body><w:p><w:t>{texto}</w:t></w:p></w:body></w:document>")
+    return ruta
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.dl = self.home / "Downloads"
+        self.dl.mkdir()
+        conf = self.home / "reglas.conf"
+        conf.write_text(REGLAS, encoding="utf-8")
+        parches = [
+            mock.patch.object(ordenito, "HOME", self.home),
+            mock.patch.object(ordenito, "CONFIG", conf),
+            mock.patch.object(ordenito, "ESTADO", self.home / "estado"),
+            mock.patch.dict(os.environ, {"ORDENITO_CARPETA": str(self.dl)}),
+        ]
+        for p in parches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.reglas = ordenito.leer_reglas()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def archivo(self, nombre, texto="x"):
+        ruta = self.dl / nombre
+        if ruta.suffix == ".docx":
+            return docx(ruta, texto)
+        ruta.write_text(texto, encoding="utf-8")
+        return ruta
+
+    def destino(self, nombre, texto="x"):
+        return ordenito.clasificar(self.archivo(nombre, texto), self.reglas).destino
+
+
+class TestTexto(unittest.TestCase):
+    def test_normalizar_quita_tildes_y_guiones(self):
+        self.assertEqual(ordenito.normalizar("Configuración_de-Redes  VLAN"), "configuracion de redes vlan")
+
+    def test_contar_solo_palabras_completas(self):
+        self.assertEqual(ordenito.contar("curso", "un recurso y un concurso"), 0)
+        self.assertEqual(ordenito.contar("curso", "el curso, otro curso."), 2)
+
+    def test_contar_palabras_con_simbolos(self):
+        self.assertEqual(ordenito.contar("any.run", "reporte de any.run hoy"), 1)
+        self.assertEqual(ordenito.contar("indicator(", "indicator('x')"), 1)
+
+
+class TestClasificar(Base):
+    def test_por_contenido_de_docx(self):
+        self.assertEqual(self.destino("Tarea3.docx", "Prof. Ana Pérez: subnetting y enrutamiento"),
+                         "Docs/Uni/Redes")
+
+    def test_nombre_pesa_mas_que_contenido(self):
+        self.assertEqual(self.destino("english homework.txt", "malware malware"), "Docs/Uni/Ingles")
+
+    def test_subcarpeta_mas_especifica_gana(self):
+        self.assertEqual(self.destino("informe.txt", "vlan y router; red de la tienda aurora, maqueta"),
+                         "Docs/Uni/Redes/Proyecto Final")
+
+    def test_comodin_dentro_de_cualquier_tema(self):
+        self.assertEqual(self.destino("tarea.txt", "RED-1015 malware. Proyecto final"),
+                         "Docs/Uni/Seguridad/Proyecto Final")
+
+    def test_codigos_parecidos_no_se_confunden(self):
+        self.assertEqual(self.destino("a.txt", "RED-1015 red-1015"), "Docs/Uni/Seguridad")
+        self.assertEqual(self.destino("b.txt", "RED-1010 red-1010"), "Docs/Uni/Redes")
+
+    def test_extensiones_limitan_el_bloque(self):
+        self.assertEqual(self.destino("modal.php", "lms lms"), "Docs/Codigo")
+        self.assertIsNone(self.destino("distribucion.txt", "lms lms"))
+
+    def test_zip_se_juzga_por_lo_que_trae(self):
+        ruta = self.dl / "pruebas.zip"
+        with zipfile.ZipFile(ruta, "w") as z:
+            z.writestr("orig_locations-action.php", "")
+            z.writestr("logout-action.php", "")
+        self.assertEqual(ordenito.clasificar(ruta, self.reglas).destino, "Docs/Codigo")
+
+    def test_respaldo_por_tipo(self):
+        self.assertEqual(self.destino("foto.jpg"), "Fotos")
+        self.assertEqual(self.destino("App.flatpakref"), "Instaladores")
+
+    def test_tema_gana_al_respaldo(self):
+        self.assertEqual(self.destino("tienda aurora maqueta.png"), "Docs/Uni/Redes/Proyecto Final")
+
+    def test_nada_coincide(self):
+        self.assertIsNone(self.destino("raro.xyz", "nada que ver"))
+
+    def test_una_sola_mencion_no_basta(self):
+        self.assertIsNone(self.destino("notas.txt", "hablamos de una vlan"))
+
+    def test_zip_bomb_no_revienta(self):
+        ruta = self.dl / "bomba.docx"
+        with zipfile.ZipFile(ruta, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("word/document.xml", "a" * 50_000_000)
+        self.assertLessEqual(len(ordenito.contenido(ruta)), ordenito.MAX_MIEMBRO)
+
+    def test_archivo_corrupto_no_falla(self):
+        self.assertIsNone(self.destino("roto.pptx", "no soy un zip"))
+
+
+class TestAcciones(Base):
+    def ordenar(self, **kw):
+        with redirect_stdout(io.StringIO()):
+            return ordenito.ordenar(esperar=False, avisar=False, **kw)
+
+    def test_mueve_y_registra(self):
+        self.archivo("tarea.docx", "subnetting y enrutamiento, ana perez")
+        self.assertEqual(self.ordenar(), 1)
+        self.assertTrue((self.home / "Docs/Uni/Redes/tarea.docx").exists())
+        self.assertEqual(len(ordenito._historial()), 1)
+
+    def test_simular_no_mueve(self):
+        self.archivo("tarea.docx", "subnetting y enrutamiento, ana perez")
+        self.ordenar(simular=True)
+        self.assertTrue((self.dl / "tarea.docx").exists())
+
+    def test_no_pisa_archivos_existentes(self):
+        destino = self.home / "Fotos"
+        destino.mkdir()
+        (destino / "foto.jpg").write_text("vieja")
+        self.archivo("foto.jpg", "nueva")
+        self.ordenar()
+        self.assertEqual((destino / "foto.jpg").read_text(), "vieja")
+        self.assertEqual((destino / "foto (2).jpg").read_text(), "nueva")
+
+    def test_ignora_descargas_en_curso_y_ocultos(self):
+        self.archivo("video.mp4.part")
+        self.archivo(".oculto.jpg")
+        self.assertEqual(self.ordenar(), 0)
+
+    def test_deshacer_devuelve_y_no_se_vuelve_a_mover(self):
+        self.archivo("foto.jpg")
+        self.ordenar()
+        with redirect_stdout(io.StringIO()):
+            ordenito.deshacer(1)
+        self.assertTrue((self.dl / "foto.jpg").exists())
+        self.assertEqual(self.ordenar(), 0, "un archivo devuelto no debe volver a moverse")
+        self.assertEqual(ordenito._historial(), [])
+
+    def test_explicar_y_revisar_no_mueven(self):
+        f = self.archivo("foto.jpg")
+        with redirect_stdout(io.StringIO()) as salida:
+            ordenito.explicar(f)
+            ordenito.revisar(self.dl)
+        self.assertIn("Fotos", salida.getvalue())
+        self.assertTrue(f.exists())
+
+
+    def test_revisar_respeta_subcarpetas_propias(self):
+        propia = self.home / "Fotos" / "Viaje"
+        propia.mkdir(parents=True)
+        (propia / "playa.txt").write_text("english grammar")
+        with redirect_stdout(io.StringIO()) as salida:
+            ordenito.revisar(self.home / "Fotos")
+        self.assertIn("0 archivo(s)", salida.getvalue())
+
+
+class TestEjemplo(unittest.TestCase):
+    def test_reglas_de_ejemplo_son_validas(self):
+        reglas = ordenito.leer_reglas(RAIZ / "reglas.ejemplo.conf")
+        self.assertGreater(len(reglas), 10)
+        respaldos = [r.destino for r in reglas if r.respaldo]
+        self.assertTrue(all(r.extensiones for r in reglas if r.respaldo),
+                        f"bloques sin palabras ni extensiones: {respaldos}")
+
+
+if __name__ == "__main__":
+    unittest.main()
