@@ -136,6 +136,8 @@ El instalador ya abrió la ventana correcta. Si no se abrió, ve a:
 
 > Si ya habías instalado antes y quieres el asistente, abre la pestaña **Carpetas → Carpetas recomendadas…**
 
+<p align="center"><img src="app-macos.png" alt="Ordenito funcionando en macOS" width="720"><br><sub>Ordenito en macOS, con una descarga ya ordenada.</sub></p>
+
 ### Qué hay en cada pestaña
 
 | Pestaña | Para qué sirve |
