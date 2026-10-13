@@ -236,6 +236,136 @@ class TestAcciones(Base):
         self.assertIn("0 archivo(s)", salida.getvalue())
 
 
+class TestDuplicados(Base):
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(self.home / "share")})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def ordenar(self):
+        with redirect_stdout(io.StringIO()):
+            return ordenito.ordenar(esperar=False, avisar=False)
+
+    def test_descarga_repetida_va_a_la_papelera(self):
+        fotos = self.home / "Fotos"
+        fotos.mkdir()
+        (fotos / "foto.jpg").write_text("misma foto")
+        self.archivo("foto (1).jpg", "misma foto")
+        self.ordenar()
+        self.assertEqual(sorted(f.name for f in fotos.iterdir()), ["foto.jpg"], "no debe crear copias")
+        papelera = self.home / "share" / "Trash"
+        self.assertTrue((papelera / "files" / "foto (1).jpg").exists())
+        self.assertTrue((papelera / "info" / "foto (1).jpg.trashinfo").exists())
+
+    def test_mismo_nombre_distinto_contenido_no_es_duplicado(self):
+        fotos = self.home / "Fotos"
+        fotos.mkdir()
+        (fotos / "foto.jpg").write_text("vieja")
+        self.archivo("foto.jpg", "nueva")
+        self.ordenar()
+        self.assertTrue((fotos / "foto (2).jpg").exists())
+
+    def test_deshacer_saca_de_la_papelera(self):
+        fotos = self.home / "Fotos"
+        fotos.mkdir()
+        (fotos / "foto.jpg").write_text("igual")
+        self.archivo("otra.jpg", "igual")
+        self.ordenar()
+        with redirect_stdout(io.StringIO()):
+            ordenito.deshacer(1)
+        self.assertTrue((self.dl / "otra.jpg").exists())
+        self.assertFalse(any((self.home / "share" / "Trash" / "info").iterdir()))
+
+    def test_comando_duplicados_conserva_el_nombre_limpio(self):
+        docs = self.home / "Docs"
+        (docs / "sub").mkdir(parents=True)
+        (docs / "guia.pdf").write_text("contenido")
+        (docs / "guia (1).pdf").write_text("contenido")
+        (docs / "sub" / "copia.pdf").write_text("contenido")
+        (docs / "otro.pdf").write_text("distinto")
+        with redirect_stdout(io.StringIO()) as salida:
+            ordenito.duplicados(docs)
+        self.assertIn("2 copia(s)", salida.getvalue())
+        self.assertTrue((docs / "guia (1).pdf").exists(), "sin --papelera no se toca nada")
+        with redirect_stdout(io.StringIO()):
+            ordenito.duplicados(docs, quitar=True)
+        quedan = sorted(str(f.relative_to(docs)) for f in docs.rglob("*") if f.is_file())
+        self.assertEqual(quedan, ["guia.pdf", "otro.pdf"])
+
+
+class TestCorregir(Base):
+    def corregir(self, *args, **kw):
+        with redirect_stdout(io.StringIO()) as salida:
+            ordenito.corregir(*args, **kw)
+        return salida.getvalue()
+
+    def test_candidatas_encuentra_autor_codigo_y_docente(self):
+        f = docx(self.dl / "caso.docx", "Asignatura BD-2030 · Docente: Laura Gómez Peña. Caso de estudio",
+                 autor="Pedro Marte")
+        pistas = ordenito.candidatas(f)
+        self.assertIn("Pedro Marte", pistas)
+        self.assertIn("BD-2030", pistas)
+        self.assertIn("Laura Gómez Peña", pistas)
+
+    def test_corregir_mueve_y_aprende(self):
+        # Antes: el tema (redes) gana y el archivo iría a Redes
+        f = docx(self.dl / "caso.docx", "subnetting vlan router " * 3, autor="Pedro Marte")
+        self.assertEqual(ordenito.clasificar(f, self.reglas).destino, "Docs/Uni/Redes")
+        salida = self.corregir(f, self.home / "Docs/Uni/Seguridad", todas=True)
+        self.assertTrue((self.home / "Docs/Uni/Seguridad/caso.docx").exists())
+        self.assertIn("pedro marte", ordenito.CONFIG.read_text())
+        self.assertIn("La próxima vez", salida)
+        # Después: otro documento del mismo autor ya va solo a Seguridad
+        g = docx(self.dl / "caso2.docx", "subnetting vlan router " * 3, autor="Pedro Marte")
+        self.assertEqual(ordenito.clasificar(g, ordenito.leer_reglas()).destino, "Docs/Uni/Seguridad")
+
+    def test_corregir_extiende_linea_fuertes_existente(self):
+        f = self.archivo("x.txt", "algo")
+        self.corregir(f, self.home / "Docs/Uni/Seguridad", pistas=["Ana Rivas"])
+        bloque = ordenito.CONFIG.read_text().split("[Docs/Uni/Seguridad]")[1].split("[")[0]
+        self.assertIn("fuertes: carlos ruiz, ana rivas", bloque)
+
+    def test_corregir_a_carpeta_nueva_crea_el_bloque(self):
+        f = self.archivo("receta.txt", "algo")
+        self.corregir(f, self.home / "Docs/Cocina", pistas=["Chef Juan"])
+        self.assertIn("[Docs/Cocina]\nfuertes: chef juan", ordenito.CONFIG.read_text())
+        self.assertTrue(any(r.destino == "Docs/Cocina" for r in ordenito.leer_reglas()))
+
+    def test_corregir_en_su_misma_carpeta_via_enlace_no_mueve(self):
+        # En Silverblue/Bazzite /home es un enlace a /var/home: la misma carpeta con otra ruta
+        real = self.home / "Docs/Uni/Redes"
+        real.mkdir(parents=True)
+        f = docx(real / "tarea.docx", "subnetting")
+        enlace = self.home / "atajo"
+        enlace.symlink_to(self.home)
+        self.corregir(enlace / "Docs/Uni/Redes/tarea.docx", enlace / "Docs/Uni/Redes", pistas=[])
+        self.assertEqual([x.name for x in real.iterdir()], ["tarea.docx"], "no debe crear 'tarea (2).docx'")
+        self.assertEqual(ordenito._historial(), [])
+
+    def test_no_sugiere_nombres_de_no_sugerir(self):
+        with ordenito.CONFIG.open("a") as c:
+            c.write("\n[no sugerir]\nlucia fernandez\n")
+        f = docx(self.dl / "t.docx", "x", autor="Lucía Fernández")
+        self.assertNotIn("Lucía Fernández", ordenito.candidatas(f))
+        self.assertFalse(any(r.destino == "no sugerir" for r in ordenito.leer_reglas()))
+
+    def test_nombre_del_docente_no_se_come_la_linea_siguiente(self):
+        ruta = self.dl / "t.docx"
+        with zipfile.ZipFile(ruta, "w") as z:
+            z.writestr("word/document.xml", "<w:p><w:t>Presentado a Prof. Laura Gómez</w:t></w:p>"
+                                            "<w:p><w:t>Santiago de los Caballeros</w:t></w:p>")
+        self.assertIn("Laura Gómez", ordenito.candidatas(ruta))
+        self.assertNotIn("Laura Gómez Santiago", ordenito.candidatas(ruta))
+
+    def test_corregir_queda_en_historial_y_se_deshace(self):
+        f = self.archivo("x.txt", "algo")
+        self.corregir(f, self.home / "Docs/Otra", pistas=[])
+        with redirect_stdout(io.StringIO()):
+            ordenito.deshacer(1)
+        self.assertTrue((self.dl / "x.txt").exists())
+
+
 class TestEjemplo(unittest.TestCase):
     def test_reglas_de_ejemplo_son_validas(self):
         reglas = ordenito.leer_reglas(RAIZ / "reglas.ejemplo.conf")

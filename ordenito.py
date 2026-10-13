@@ -7,11 +7,14 @@ Comandos:
   ordenito explicar ARCHIVO   explica a qué carpeta iría un archivo y por qué
   ordenito revisar CARPETA    busca archivos que según tus reglas están en otro lugar
   ordenito historial [N]      últimos movimientos
-  ordenito deshacer [N]       devuelve a Descargas los últimos N archivos movidos
+  ordenito deshacer [N]       devuelve a su lugar los últimos N archivos movidos
+  ordenito corregir ARCHIVO CARPETA   lo mueve donde va y aprende la pista que faltaba
+  ordenito duplicados [CARPETA]       busca copias idénticas (--papelera para quitarlas)
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -24,8 +27,9 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 HOME = Path.home()
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "ordenito" / "reglas.conf"
@@ -65,7 +69,18 @@ class Regla:
         return not self.palabras and not self.fuertes
 
 
+NO_SUGERIR = "no sugerir"   # [no sugerir]: tu nombre y el de tus compañeros (no es una carpeta)
+
+
 def leer_reglas(ruta=None):
+    return [r for r in _bloques(ruta) if r.destino.lower() != NO_SUGERIR]
+
+
+def no_sugerir(ruta=None):
+    return {p for r in _bloques(ruta) if r.destino.lower() == NO_SUGERIR for p in r.palabras + r.fuertes}
+
+
+def _bloques(ruta=None):
     ruta = ruta or CONFIG
     if not ruta.exists():
         sys.exit(f"No encuentro las reglas en {ruta}.\n"
@@ -112,6 +127,7 @@ def contenido(f):
                 partes += [n for n in nombres if n == "content.xml" or re.match(
                     r"(word/document|ppt/slides/slide\d+|xl/sharedStrings)\.xml$", n)]
                 xml = " ".join(_leer_miembro(z, n) for n in partes[:50])
+            xml = re.sub(r"</(?:w:p|a:p|text:p|text:h)>", "\n", xml)  # conservar fin de párrafo
             return re.sub(r"<[^>]+>", " ", xml)
         if ext == ".zip":
             with zipfile.ZipFile(f) as z:
@@ -236,9 +252,14 @@ def ruta_destino(destino):
     return Path(destino).expanduser() if destino.startswith(("/", "~")) else HOME / destino
 
 
+def real(ruta):
+    """Ruta absoluta sin enlaces: en Silverblue/Bazzite /home es un enlace a /var/home."""
+    return Path(ruta).expanduser().resolve()
+
+
 def bonito(ruta):
-    ruta = Path(ruta)
-    return "~/" + str(ruta.relative_to(HOME)) if ruta.is_relative_to(HOME) else str(ruta)
+    ruta, casa = real(ruta), real(HOME)
+    return "~/" + str(ruta.relative_to(casa)) if ruta.is_relative_to(casa) else str(ruta)
 
 
 def libre(carpeta, nombre):
@@ -280,6 +301,51 @@ def _historial():
     return [json.loads(l) for l in lineas if l.strip()]
 
 
+def _registrar(desde, hacia, puntos=0, **extra):
+    ESTADO.mkdir(parents=True, exist_ok=True)
+    with (ESTADO / "historial.jsonl").open("a", encoding="utf-8") as h:
+        h.write(json.dumps({"fecha": datetime.now().isoformat(timespec="seconds"),
+                            "desde": str(desde), "hacia": str(hacia), "puntos": puntos, **extra},
+                           ensure_ascii=False) + "\n")
+
+
+def papelera():
+    return Path(os.environ.get("XDG_DATA_HOME", HOME / ".local" / "share")) / "Trash"
+
+
+def a_papelera(f):
+    """Manda a la papelera (estándar freedesktop): se puede restaurar desde Archivos."""
+    t = papelera()
+    (t / "files").mkdir(parents=True, exist_ok=True)
+    (t / "info").mkdir(parents=True, exist_ok=True)
+    destino = libre(t / "files", f.name)
+    (t / "info" / f"{destino.name}.trashinfo").write_text(
+        f"[Trash Info]\nPath={quote(str(f.resolve()))}\n"
+        f"DeletionDate={datetime.now():%Y-%m-%dT%H:%M:%S}\n")
+    shutil.move(str(f), str(destino))
+    return destino
+
+
+def huella(f):
+    h = hashlib.sha256()
+    with f.open("rb") as a:
+        for bloque in iter(lambda: a.read(1 << 20), b""):
+            h.update(bloque)
+    return h.hexdigest()
+
+
+def gemelo(f, carpeta):
+    """Archivo con exactamente el mismo contenido que f dentro de carpeta (sin subcarpetas)."""
+    if not carpeta.is_dir():
+        return None
+    tam = f.stat().st_size
+    mismos = [c for c in carpeta.iterdir() if c.is_file() and c != f and c.stat().st_size == tam]
+    if not mismos:
+        return None
+    propia = huella(f)
+    return next((c for c in mismos if huella(c) == propia), None)
+
+
 def notificar(titulo, cuerpo):
     if shutil.which("notify-send"):
         subprocess.run(["notify-send", "-a", "Ordenito", "-i", "folder-documents", titulo, cuerpo],
@@ -304,18 +370,27 @@ def ordenar(simular=False, esperar=True, avisar=True):
         res = clasificar(f, reglas)
         if not res.destino:
             continue
-        nuevo = libre(ruta_destino(res.destino), f.name)
+        carpeta = ruta_destino(res.destino)
+        igual = gemelo(f, carpeta)
+        if igual:  # ya lo tenías: no guardar una copia "(2)"
+            if simular:
+                print(f"  {f.name}  →  papelera  {gris(f'(ya lo tienes: {bonito(igual)})')}")
+                continue
+            tirado = a_papelera(f)
+            movidos += 1
+            _registrar(f, tirado, res.puntos, duplicado_de=str(igual))
+            if avisar:
+                notificar("Ya lo tenías", f"{f.name} es idéntico a {bonito(igual)}.\n"
+                                          "La copia nueva fue a la papelera.")
+            continue
+        nuevo = libre(carpeta, f.name)
         if simular:
             print(f"  {f.name}  →  {bonito(nuevo.parent)}  {gris(f'({res.puntos} pts, {res.motivo})')}")
             continue
         nuevo.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(f), str(nuevo))
         movidos += 1
-        ESTADO.mkdir(parents=True, exist_ok=True)
-        with (ESTADO / "historial.jsonl").open("a", encoding="utf-8") as h:
-            h.write(json.dumps({"fecha": datetime.now().isoformat(timespec="seconds"),
-                                "desde": str(f), "hacia": str(nuevo), "puntos": res.puntos},
-                               ensure_ascii=False) + "\n")
+        _registrar(f, nuevo, res.puntos)
         if avisar:
             notificar("Descarga ordenada", f"{f.name}\n→ {bonito(nuevo.parent)}")
     return movidos
@@ -334,7 +409,10 @@ def deshacer(n=1):
             print(f"  ✗ {actual.name}: ya no está en {bonito(actual.parent)}, lo salto")
             continue
         vuelta = libre(origen.parent, origen.name)
+        origen.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(actual), str(vuelta))
+        if actual.is_relative_to(papelera() / "files"):
+            (papelera() / "info" / f"{actual.name}.trashinfo").unlink(missing_ok=True)
         ignorados.add(vuelta.name)  # para que el servicio no lo vuelva a mover
         print(f"  ↩ {vuelta.name}  →  {bonito(vuelta.parent)}")
     _guardar_json("ignorados.json", sorted(ignorados))
@@ -347,8 +425,11 @@ def historial(n=15):
     if not registros:
         print("Todavía no se ha movido nada.")
     for r in registros:
-        print(f"  {gris(r['fecha'].replace('T', ' '))}  {Path(r['hacia']).name}  →  "
-              f"{bonito(Path(r['hacia']).parent)}")
+        fecha, nombre = gris(r["fecha"].replace("T", " ")), Path(r["desde"]).name
+        if r.get("duplicado_de"):
+            print(f"  {fecha}  {nombre}  →  papelera {gris('(igual a ' + bonito(r['duplicado_de']) + ')')}")
+        else:
+            print(f"  {fecha}  {nombre}  →  {bonito(Path(r['hacia']).parent)}")
 
 
 def explicar(f):
@@ -374,17 +455,168 @@ def propia(carpeta, destinos):
 
 
 def revisar(carpeta):
-    raiz, reglas, distintos = Path(carpeta).expanduser(), leer_reglas(), 0
-    destinos = {ruta_destino(r.destino) for r in reglas if not r.comodin}
+    raiz, reglas, distintos = real(carpeta), leer_reglas(), 0
+    destinos = {real(ruta_destino(r.destino)) for r in reglas if not r.comodin}
     for f in sorted(p for p in raiz.rglob("*") if p.is_file() and not p.name.startswith(".")):
         if propia(f.parent, destinos):
             continue
         res = clasificar(f, reglas)
-        if res.destino and ruta_destino(res.destino) != f.parent:
+        if res.destino and real(ruta_destino(res.destino)) != f.parent:
             distintos += 1
             print(f"  {bonito(f)}\n      → {bonito(ruta_destino(res.destino))}  {gris(f'({res.motivo})')}")
     print(f"\n{distintos} archivo(s) estarían en otro lugar según tus reglas. No se movió nada.")
     print(gris("Las subcarpetas que creaste tú dentro de un destino se respetan y no se revisan."))
+
+
+def autor(f):
+    """Autor guardado en el documento (Office/LibreOffice/PDF), o ''."""
+    ext = f.suffix.lower()
+    try:
+        if ext in OFIMATICA:
+            with zipfile.ZipFile(f) as z:
+                for parte in ("docProps/core.xml", "meta.xml"):
+                    if parte in z.namelist():
+                        m = re.search(r"<(?:dc:creator|meta:initial-creator)>([^<]+)<", _leer_miembro(z, parte))
+                        if m:
+                            return m.group(1).strip()
+        if ext == ".pdf" and shutil.which("pdfinfo"):
+            info = subprocess.run(["pdfinfo", "--", str(f)], capture_output=True, text=True, timeout=10)
+            m = re.search(r"^Author:\s*(.+)$", info.stdout, re.M)
+            if m:
+                return m.group(1).strip()
+    except (OSError, zipfile.BadZipFile, subprocess.SubprocessError, ValueError):
+        pass
+    return ""
+
+
+def _mi_nombre():
+    try:
+        import pwd
+        return normalizar(pwd.getpwuid(os.getuid()).pw_gecos.split(",")[0]).strip()
+    except (ImportError, KeyError):
+        return ""
+
+
+NOMBRE = r"[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:[ \t]+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){1,3}"  # sin saltar de línea
+
+
+def candidatas(f):
+    """Pistas de identidad que se ven en el archivo: autor, códigos de materia y docentes."""
+    portada = re.sub(r"[ \t]+", " ", contenido(f))[:3000]
+    vistas, pistas = {_mi_nombre(), ""} | no_sugerir(), []
+    encontradas = [autor(f)]
+    encontradas += re.findall(r"\b[A-Z]{2,5}-\d{3,4}(?:-\d{2,4})?\b", portada)
+    encontradas += re.findall(r"(?:Prof(?:esora?)?\.?|Docente|Maestr[oa]|Teacher|Facilitador[a]?|Presentado a)"
+                              r"[ \t]*:?[ \t]*(?:Prof\.?[ \t]*)?(" + NOMBRE + ")", portada)
+    for p in encontradas:
+        clave = normalizar(p).strip()
+        if len(clave) > 3 and not any(clave in v or v in clave for v in vistas if v):
+            vistas.add(clave)
+            pistas.append(p.strip())
+    return pistas
+
+
+def agregar_fuertes(destino, pistas, ruta=None):
+    """Agrega pistas a la línea 'fuertes:' del bloque [destino] (o crea el bloque)."""
+    ruta = ruta or CONFIG
+    lineas = ruta.read_text(encoding="utf-8").splitlines()
+    nuevas = ", ".join(normalizar(p).strip() for p in pistas)
+    try:
+        i = next(n for n, l in enumerate(lineas) if l.strip() == f"[{destino}]")
+    except StopIteration:
+        lineas += ["", f"[{destino}]", f"fuertes: {nuevas}"]
+    else:
+        fin = next((n for n in range(i + 1, len(lineas)) if lineas[n].strip().startswith("[")), len(lineas))
+        f = next((n for n in range(i + 1, fin) if lineas[n].strip().lower().startswith("fuertes:")), None)
+        if f is not None:
+            lineas[f] = lineas[f].rstrip().rstrip(",") + ", " + nuevas
+        else:
+            j = i + 1
+            while j < fin and lineas[j].strip().startswith("#"):
+                j += 1
+            lineas.insert(j, f"fuertes: {nuevas}")
+    ruta.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+
+
+def corregir(archivo, carpeta, pistas=None, todas=False):
+    f, carpeta = real(archivo), Path(carpeta).expanduser()
+    if not f.is_file():
+        sys.exit(f"No existe el archivo: {f}")
+    carpeta = real(carpeta if carpeta.is_absolute() else HOME / carpeta)
+    reglas, casa = leer_reglas(), real(HOME)
+    destino = next((r.destino for r in reglas if not r.comodin and real(ruta_destino(r.destino)) == carpeta),
+                   str(carpeta.relative_to(casa)) if carpeta.is_relative_to(casa) else str(carpeta))
+
+    if f.parent != carpeta:
+        nuevo = libre(carpeta, f.name)
+        carpeta.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(f), str(nuevo))
+        _registrar(f, nuevo, corregido=True)
+        print(f"  📁 {f.name}  →  {bonito(carpeta)}")
+        f = nuevo
+
+    if pistas is None:
+        ya = {p for r in reglas if r.destino == destino for p in r.fuertes}
+        sugeridas = [p for p in candidatas(f) if normalizar(p).strip() not in ya]
+        if not sugeridas:
+            print(gris("  No encontré pistas nuevas (autor, código o docente) para aprender."))
+            pistas = []
+        elif todas:
+            pistas = sugeridas
+        else:
+            print("\n  Pistas que encontré en el archivo:")
+            for n, p in enumerate(sugeridas, 1):
+                print(f"    {n}. {p}")
+            if not sys.stdin.isatty():
+                print(gris("  (Agrégalas con --todas o --pista TEXTO)"))
+                pistas = []
+            else:
+                elegidas = input("  ¿Cuáles agrego a esa carpeta? (ej. 1,3 · Enter = ninguna): ")
+                pistas = [sugeridas[int(n) - 1] for n in re.findall(r"\d+", elegidas)
+                          if 0 < int(n) <= len(sugeridas)]
+    if pistas:
+        agregar_fuertes(destino, pistas)
+        print(f"  ✓ Aprendido para [{destino}]: {', '.join(pistas)}")
+
+    res = clasificar(f, leer_reglas())
+    if res.destino and real(ruta_destino(res.destino)) == carpeta:
+        print(f"  ✓ La próxima vez un archivo así irá solo a {bonito(carpeta)}")
+    else:
+        print(f"  ⚠ Con las reglas actuales todavía iría a "
+              f"{bonito(ruta_destino(res.destino)) if res.destino else 'Descargas'}. "
+              f"Mira por qué con: ordenito explicar \"{f}\"")
+
+
+def duplicados(carpeta, quitar=False):
+    """Busca archivos idénticos; con quitar=True manda las copias sobrantes a la papelera."""
+    raiz = Path(carpeta).expanduser()
+    por_tam = {}
+    for f in raiz.rglob("*"):
+        if f.is_file() and not f.is_symlink() and not f.name.startswith(".") and f.stat().st_size > 0:
+            por_tam.setdefault(f.stat().st_size, []).append(f)
+    grupos = {}
+    for mismos in (v for v in por_tam.values() if len(v) > 1):
+        for f in mismos:
+            grupos.setdefault(huella(f), []).append(f)
+    copia = re.compile(r"\s*\(\d+\)$")
+    sobran, ahorro = 0, 0
+    for g in (g for g in grupos.values() if len(g) > 1):
+        # Se queda el de nombre "limpio" (sin "(1)") y, si empatan, el más antiguo
+        g.sort(key=lambda f: (bool(copia.search(f.stem)), f.stat().st_mtime, len(f.name)))
+        print(f"  ✓ {bonito(g[0])}")
+        for f in g[1:]:
+            sobran, ahorro = sobran + 1, ahorro + f.stat().st_size
+            if quitar:
+                _registrar(f, a_papelera(f), duplicado_de=str(g[0]))
+                print(f"    🗑 {bonito(f)}")
+            else:
+                print(f"    = {bonito(f)}")
+    if not sobran:
+        print("No hay archivos duplicados.")
+    elif quitar:
+        print(f"\n{sobran} copia(s) a la papelera ({ahorro / 1e6:.1f} MB). Se recuperan con 'ordenito deshacer {sobran}'.")
+    else:
+        print(f"\n{sobran} copia(s) repetida(s), {ahorro / 1e6:.1f} MB. Quítalas con: ordenito duplicados {carpeta} --papelera")
 
 
 # ───────────────────────────── consola ─────────────────────────────
@@ -411,8 +643,16 @@ def main(argv=None):
     s.add_argument("carpeta", nargs="?", default="~/Documents")
     s = sub.add_parser("historial", help="últimos movimientos")
     s.add_argument("n", nargs="?", type=int, default=15)
-    s = sub.add_parser("deshacer", help="devuelve a Descargas los últimos N archivos")
+    s = sub.add_parser("deshacer", help="devuelve a su lugar los últimos N archivos")
     s.add_argument("n", nargs="?", type=int, default=1)
+    s = sub.add_parser("corregir", help="mueve un archivo a donde va y aprende la pista que faltaba")
+    s.add_argument("archivo")
+    s.add_argument("carpeta", help="carpeta correcta (ej. ~/Documents/Universidad/Redes)")
+    s.add_argument("--pista", action="append", metavar="TEXTO", help="pista fuerte a aprender (repetible)")
+    s.add_argument("--todas", action="store_true", help="aprende todas las pistas sugeridas sin preguntar")
+    s = sub.add_parser("duplicados", help="busca archivos idénticos repetidos")
+    s.add_argument("carpeta", nargs="?", default="~/Documents")
+    s.add_argument("--papelera", action="store_true", help="manda las copias sobrantes a la papelera")
     a = p.parse_args(argv)
 
     if a.comando in (None, "ordenar"):
@@ -428,6 +668,10 @@ def main(argv=None):
         historial(a.n)
     elif a.comando == "deshacer":
         deshacer(a.n)
+    elif a.comando == "corregir":
+        corregir(a.archivo, a.carpeta, a.pista, a.todas)
+    elif a.comando == "duplicados":
+        duplicados(a.carpeta, a.papelera)
 
 
 if __name__ == "__main__":

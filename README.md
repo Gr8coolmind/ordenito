@@ -37,6 +37,8 @@ La mayoría de los organizadores solo miran la extensión: todos los PDF juntos,
 | 🪆 **Entiende subcarpetas** | Si un archivo encaja en `Universidad` y también en `Universidad/Redes`, va a la más específica. |
 | 🃏 **Comodines** | `[*/Proyecto Final]` crea esa subcarpeta dentro de *cualquier* materia que gane. |
 | 🔍 **Te explica sus decisiones** | `ordenito explicar archivo.pdf` muestra los puntos de cada carpeta y las palabras que coincidieron. |
+| 🎓 **Aprende de tus correcciones** | `ordenito corregir archivo carpeta` lo mueve a donde va y te ofrece aprender la pista que faltaba (el autor, el código de la materia, el docente). |
+| 👯 **Sin duplicados** | Si descargas algo que ya tenías, no guarda una copia `(1)`: la manda a la papelera y te avisa. `ordenito duplicados` encuentra las copias que ya tienes. |
 | ↩️ **Se puede deshacer** | `ordenito deshacer` devuelve el archivo, y Ordenito no lo vuelve a mover. |
 | 🔒 **100 % local** | No usa internet ni IA en la nube. Nada de tus documentos sale de tu computadora. |
 | 🪶 **Cero dependencias** | Un solo archivo de Python, solo con la biblioteca estándar. `pdftotext` es opcional. |
@@ -121,7 +123,9 @@ El [archivo de ejemplo](reglas.ejemplo.conf) trae categorías listas para estudi
 | `ordenito explicar ARCHIVO` | Explica a qué carpeta iría un archivo y por qué. |
 | `ordenito revisar [CARPETA]` | Busca archivos que, según tus reglas, estarían mejor en otro lugar. Respeta las subcarpetas que creaste tú. No mueve nada. |
 | `ordenito historial [N]` | Muestra los últimos movimientos. |
-| `ordenito deshacer [N]` | Devuelve a Descargas los últimos N archivos movidos. |
+| `ordenito deshacer [N]` | Devuelve a su lugar los últimos N archivos movidos (también los que fueron a la papelera). |
+| `ordenito corregir ARCHIVO CARPETA` | Mueve un archivo mal clasificado y aprende la pista que faltaba. `--todas` acepta todas las sugerencias y `--pista TEXTO` agrega una a mano. |
+| `ordenito duplicados [CARPETA]` | Lista archivos idénticos (compara el contenido, no el nombre). Con `--papelera` quita las copias y se queda con el nombre más limpio. |
 
 ```console
 $ ordenito explicar Tarea3_redes.docx
@@ -134,10 +138,26 @@ Tarea3_redes.docx
   → ~/Documents/Universidad/Redes/Proyecto Final  (dentro del tema: proyecto final ×1)
 ```
 
+### Cuando algo cae donde no va
+
+```console
+$ ordenito corregir "Caso de estudio 2.docx" ~/Documents/Universidad/Seguridad
+  📁 Caso de estudio 2.docx  →  ~/Documents/Universidad/Seguridad
+
+  Pistas que encontré en el archivo:
+    1. Carlos Ruiz
+    2. SEG-2040
+  ¿Cuáles agrego a esa carpeta? (ej. 1,3 · Enter = ninguna): 1,2
+  ✓ Aprendido para [Documents/Universidad/Seguridad]: Carlos Ruiz, SEG-2040
+  ✓ La próxima vez un archivo así irá solo a ~/Documents/Universidad/Seguridad
+```
+
+Tu nombre y el de tus compañeros salen en todos tus trabajos, así que no sirven para distinguir. Ponlos en el bloque `[no sugerir]` y nunca se te ofrecerán como pistas.
+
 ## 🛡️ Seguridad y privacidad
 
 - **Todo ocurre en tu equipo.** No hay red, telemetría ni servicios externos.
-- **Nunca sobrescribe nada.** Si ya existe `informe.pdf` en el destino, guarda el nuevo como `informe (2).pdf`.
+- **Nunca sobrescribe ni borra nada.** Si ya existe un `informe.pdf` distinto, guarda el nuevo como `informe (2).pdf`. Si es idéntico, la copia va a la **papelera** (no se borra) y se recupera con `ordenito deshacer`.
 - **No toca descargas a medias.** Ignora `.part` y `.crdownload`, y espera a que el archivo deje de crecer.
 - **Lee con límites.** Lee como máximo 2 MB por parte de cada documento y 5 páginas de cada PDF, así que una *zip bomb* no puede llenarte la memoria.
 - **Corre con baja prioridad** (`Nice=10`, E/S en modo *idle*), sin `sudo` y solo dentro de tu usuario.
@@ -149,7 +169,7 @@ Tarea3_redes.docx
 python3 -m unittest discover -s tests -v
 ```
 
-Las pruebas cubren la puntuación, las pistas fuertes (autor, encabezado y menciones de pasada), las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13.
+Las pruebas cubren la puntuación, las pistas fuertes (autor, encabezado y menciones de pasada), `corregir`, los duplicados, las rutas con enlaces de Silverblue, las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13.
 
 ## 🗑️ Desinstalar
 
@@ -183,7 +203,7 @@ Sí. Usa la variable `ORDENITO_CARPETA` (por ejemplo, `ORDENITO_CARPETA=~/Escrit
 <details>
 <summary><b>Un archivo cayó en la carpeta equivocada</b></summary>
 
-Ejecuta `ordenito deshacer`, mira el motivo con `ordenito explicar ARCHIVO` y agrega a tus reglas una palabra clave más específica.
+Usa `ordenito corregir ARCHIVO CARPETA_CORRECTA`. Lo mueve y te ofrece aprender la pista que faltaba. Si quieres entender qué pasó, `ordenito explicar ARCHIVO` muestra los puntos de cada carpeta.
 </details>
 
 ---
