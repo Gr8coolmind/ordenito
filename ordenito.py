@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 HOME = Path.home()
 MAC = sys.platform == "darwin"
@@ -44,6 +44,7 @@ PESO_NOMBRE = 10      # una palabra clave en el nombre vale como 10 en el conten
 PESO_FUERTE = 25      # pista 'fuertes:' (profesor, código, cliente) en nombre, autor, encabezado o portada
 PESO_FUERTE_CUERPO = 3  # la misma pista mencionada de pasada en el cuerpo
 PORTADA = 1500        # caracteres iniciales que cuentan como portada (metadatos y encabezados van primero)
+PESO_VECINO = 20      # el nombre se parece al de un archivo que ya guardaste en esa carpeta
 MINIMO = 2            # puntos mínimos para que un tema cuente
 MAX_POR_PALABRA = 5   # una palabra repetida 100 veces no debe ganar sola
 MAX_TEXTO = 50_000    # caracteres de contenido que se analizan
@@ -188,6 +189,51 @@ def puntuar(palabras, nombre, texto, fuertes=()):
     return puntos, pistas
 
 
+VACIAS = {"de", "del", "la", "las", "el", "los", "y", "e", "o", "en", "a", "al", "con", "por", "para",
+          "un", "una", "the", "of", "and", "to", "in", "for", "on", "copia", "copy", "final", "v1", "v2"}
+
+
+def parejas(nombre, ignorar=frozenset()):
+    """Pares de palabras seguidas que distinguen un nombre ('tienda lunar', 'tarea4 subnetting').
+    Sin números sueltos, palabras vacías ni tu nombre: eso se repite en todas partes."""
+    palabras = [p for p in re.findall(r"\w+", nombre)
+                if len(p) > 2 and not p.isdigit() and p not in VACIAS and p not in ignorar]
+    return set(zip(palabras, palabras[1:]))
+
+
+def _ignorar_nombres():
+    return frozenset(p for n in no_sugerir() | {_mi_nombre()} for p in n.split())
+
+
+def vecinos(f, reglas, nombre):
+    """{destino: (puntos, pistas)} para las carpetas donde ya guardaste un archivo de nombre
+    parecido. Solo cuenta un parecido que sale en UNA carpeta: si sale en varias, no distingue."""
+    ignorar = _ignorar_nombres()
+    mias = parejas(nombre, ignorar)
+    if not mias:
+        return {}
+    yo, donde = real(f), {}
+    for r in reglas:
+        carpeta = ruta_destino(r.destino)
+        if r.comodin or r.respaldo or not carpeta.is_dir():
+            continue
+        try:
+            hermanos = [h for h in carpeta.iterdir() if h.is_file() and not h.name.startswith(".")]
+        except OSError:
+            continue
+        for h in hermanos:
+            if real(h) == yo or (r.extensiones and h.suffix.lower() not in r.extensiones):
+                continue
+            for par in mias & parejas(normalizar(h.stem), ignorar):
+                donde.setdefault(par, {}).setdefault(r.destino, h.name)
+    tabla = {}
+    for par, carpetas in donde.items():
+        if len(carpetas) == 1:
+            (destino, ejemplo), = carpetas.items()
+            tabla.setdefault(destino, (PESO_VECINO, [f"parecido a «{ejemplo}»"]))
+    return tabla
+
+
 @dataclass
 class Resultado:
     destino: str | None
@@ -211,6 +257,11 @@ def clasificar(f, reglas):
             puntos, pistas = puntuar(r.palabras, nombre, texto, r.fuertes)
             if puntos:
                 tabla[r.destino] = (puntos, pistas)
+    # Archivos de nombre parecido que ya guardaste: la presentación del "Caso 3 Tienda Lunar"
+    # va junto al documento del "Caso de Estudio 3 Tienda Lunar", aunque hable de otro tema
+    for destino, (puntos, pistas) in vecinos(f, reglas, nombre).items():
+        antes, previas = tabla.get(destino, (0, []))
+        tabla[destino] = (antes + puntos, previas + pistas)
 
     validos = {d: p for d, (p, _) in tabla.items() if p >= MINIMO}
     if not validos:

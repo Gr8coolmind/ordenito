@@ -162,6 +162,31 @@ class TestClasificar(Base):
         f = docx(self.dl / "guia.docx", "subnetting vlan", encabezado="Prof. Carlos Ruiz")
         self.assertEqual(ordenito.clasificar(f, self.reglas).destino, "Docs/Uni/Seguridad")
 
+    def test_nombre_parecido_a_lo_ya_guardado(self):
+        # El texto habla de redes, pero ya guardaste el caso "Tienda Lunar" en Seguridad
+        guardado = self.home / "Docs/Uni/Seguridad"
+        guardado.mkdir(parents=True)
+        (guardado / "Caso de Estudio 3 Tienda Lunar.docx").write_bytes(b"")
+        res = ordenito.clasificar(self.archivo("Caso 3 Tienda Lunar - Presentacion.txt", "vlan router"),
+                                  self.reglas)
+        self.assertEqual(res.destino, "Docs/Uni/Seguridad")
+        self.assertEqual(res.tabla["Docs/Uni/Seguridad"][0], ordenito.PESO_VECINO)
+
+    def test_parecido_en_varias_carpetas_no_cuenta(self):
+        for carpeta in ("Docs/Uni/Seguridad", "Docs/Uni/Ingles"):
+            (self.home / carpeta).mkdir(parents=True)
+            (self.home / carpeta / "Tarea Semana Uno.txt").write_text("x")
+        res = ordenito.clasificar(self.archivo("Tarea Semana Uno (2).txt", "vlan router"), self.reglas)
+        self.assertEqual(res.destino, "Docs/Uni/Redes")
+
+    def test_parecido_ignora_tu_nombre_y_numeros(self):
+        (self.home / "Docs/Uni/Seguridad").mkdir(parents=True)
+        (self.home / "Docs/Uni/Seguridad/Tarea 2 Marta Ruiz.txt").write_text("x")
+        conf = ordenito.CONFIG
+        conf.write_text(conf.read_text() + "\n[no sugerir]\nmarta ruiz\n", encoding="utf-8")
+        res = ordenito.clasificar(self.archivo("Tarea 2 Marta Ruiz.txt", "vlan router"), ordenito.leer_reglas())
+        self.assertEqual(res.destino, "Docs/Uni/Redes")
+
     def test_pista_fuerte_de_pasada_pesa_poco(self):
         # Mencionar la empresa al final de una tarea de redes no la convierte en documento de trabajo
         texto = "Tarea de subnetting y vlan con router. " + "relleno " * 400 + "Lo usaré en Acme SRL."

@@ -122,6 +122,7 @@ flowchart LR
 
 - Una pista **fuerte** (profesor, código de materia, empresa, cliente) vale **25 puntos** si aparece en el nombre, el autor, el encabezado o la portada, y **3** si solo se menciona de pasada en el cuerpo.
 - Cada palabra clave en el **nombre** del archivo vale **10 puntos**.
+- Si el nombre se parece al de un archivo que **ya guardaste** en una carpeta (comparten dos palabras seguidas, como «Tienda Lunar»), esa carpeta suma **20 puntos**. Así la presentación de un caso va junto al documento del mismo caso. No cuentan números, tu nombre ni lo que esté en `[no sugerir]`, y si el parecido sale en varias carpetas no suma en ninguna.
 - En el **contenido**, cada aparición vale **1 punto** (máximo 5 por palabra, así ninguna repetida gana sola).
 - Las palabras se comparan **completas**, sin importar mayúsculas, tildes, guiones ni guiones bajos: `curso` no coincide dentro de `recurso`.
 
@@ -216,7 +217,7 @@ Tu nombre y el de tus compañeros salen en todos tus trabajos, así que no sirve
 python3 -m unittest discover -s tests -v
 ```
 
-Las pruebas cubren la app (con una pantalla virtual), la puntuación, las pistas fuertes (autor, encabezado y menciones de pasada), `corregir`, los duplicados, las rutas con enlaces de Silverblue, las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13 en Linux y en macOS, y en un Mac real se prueba de punta a punta: instalar, descargar un archivo, comprobar que se ordena solo y abrir `Ordenito.app`.
+Las pruebas cubren la app (con una pantalla virtual), la puntuación, los nombres parecidos a lo ya guardado, las pistas fuertes (autor, encabezado y menciones de pasada), `corregir`, los duplicados, las rutas con enlaces de Silverblue, las subcarpetas, los comodines, los zips, los respaldos por tipo, los nombres repetidos, `deshacer` y la protección contra zip bombs. Se ejecutan en GitHub Actions con Python 3.9 a 3.13 en Linux y en macOS, y en un Mac real se prueba de punta a punta: instalar, descargar un archivo, comprobar que se ordena solo y abrir `Ordenito.app`.
 
 ## 🗑️ Desinstalar
 
