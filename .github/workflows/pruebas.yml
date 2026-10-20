@@ -37,6 +37,44 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
 
+  windows:
+    # Pruebas (incluida la app), instalador y el vigilante ordenando una descarga de verdad
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -v
+      - name: Instalar
+        shell: pwsh
+        env:
+          ORDENITO_SIN_PAUSA: "1"
+        run: |
+          ./instalar.cmd
+          & "$env:LOCALAPPDATA\Programs\Ordenito\bin\ordenito.cmd" --version
+      - name: Una descarga se ordena sola
+        shell: pwsh
+        run: |
+          $dl = "$env:USERPROFILE\Downloads"; New-Item -ItemType Directory -Force $dl | Out-Null
+          "Factura`nComprobante de pago" | Set-Content "$dl\factura_prueba.txt"
+          foreach ($i in 1..30) {
+            if (Test-Path "$env:USERPROFILE\Documents\Personal\Finanzas\factura_prueba.txt") { "✓ ordenada"; exit 0 }
+            Start-Sleep 2
+          }
+          Get-Content "$env:LOCALAPPDATA\ordenito\errores.log" -ErrorAction SilentlyContinue
+          exit 1
+      - name: Desinstalar
+        shell: pwsh
+        env:
+          ORDENITO_SIN_PAUSA: "1"
+        run: |
+          ./desinstalar.cmd
+          if (Test-Path "$env:LOCALAPPDATA\Programs\Ordenito") { exit 1 }
+
   macos-de-punta-a-punta:
     # Instala de verdad con launchd y comprueba que una descarga se ordena sola
     runs-on: macos-latest

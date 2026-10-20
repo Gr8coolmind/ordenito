@@ -2,10 +2,13 @@
 import importlib.util
 import io
 import os
+import struct
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
+import zlib
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -75,8 +78,11 @@ class Base(unittest.TestCase):
             mock.patch.object(ordenito, "HOME", self.home),
             mock.patch.object(ordenito, "CONFIG", conf),
             mock.patch.object(ordenito, "ESTADO", self.home / "estado"),
+            mock.patch.object(ordenito, "notificar", lambda *a: None),
             mock.patch.dict(os.environ, {"ORDENITO_CARPETA": str(self.dl)}),
         ]
+        if ordenito.WINDOWS:  # nunca tocar la Papelera de reciclaje de verdad
+            parches.append(mock.patch.object(ordenito, "papelera", lambda f=None: self.home / "Papelera"))
         for p in parches:
             p.start()
             self.addCleanup(p.stop)
@@ -183,7 +189,7 @@ class TestClasificar(Base):
         (self.home / "Docs/Uni/Seguridad").mkdir(parents=True)
         (self.home / "Docs/Uni/Seguridad/Tarea 2 Marta Ruiz.txt").write_text("x")
         conf = ordenito.CONFIG
-        conf.write_text(conf.read_text() + "\n[no sugerir]\nmarta ruiz\n", encoding="utf-8")
+        conf.write_text(conf.read_text(encoding="utf-8") + "\n[no sugerir]\nmarta ruiz\n", encoding="utf-8")
         res = ordenito.clasificar(self.archivo("Tarea 2 Marta Ruiz.txt", "vlan router"), ordenito.leer_reglas())
         self.assertEqual(res.destino, "Docs/Uni/Redes")
 
@@ -279,8 +285,12 @@ class TestDuplicados(Base):
         self.archivo("foto (1).jpg", "misma foto")
         self.ordenar()
         self.assertEqual(sorted(f.name for f in fotos.iterdir()), ["foto.jpg"], "no debe crear copias")
-        self.assertTrue((ordenito.cesto() / "foto (1).jpg").exists())
-        if not ordenito.MAC:
+        tirado = Path(ordenito._historial()[-1]["hacia"])
+        self.assertEqual(tirado.parent, ordenito.cesto())
+        self.assertEqual(tirado.read_text(), "misma foto")
+        if ordenito.WINDOWS:  # la ficha $I… es la que permite "Restaurar" desde la Papelera
+            self.assertTrue(tirado.with_name("$I" + tirado.name[2:]).exists())
+        elif not ordenito.MAC:
             self.assertTrue((ordenito.papelera() / "info" / "foto (1).jpg.trashinfo").exists())
 
     def test_mismo_nombre_distinto_contenido_no_es_duplicado(self):
@@ -300,8 +310,8 @@ class TestDuplicados(Base):
         with redirect_stdout(io.StringIO()):
             ordenito.deshacer(1)
         self.assertTrue((self.dl / "otra.jpg").exists())
-        self.assertFalse(any(ordenito.cesto().iterdir()))
-        if not ordenito.MAC:
+        self.assertFalse(any(ordenito.cesto().iterdir()), "no deben quedar fantasmas en la papelera")
+        if not ordenito.MAC and not ordenito.WINDOWS:
             self.assertFalse(any((ordenito.papelera() / "info").iterdir()))
 
     def test_comando_duplicados_conserva_el_nombre_limpio(self):
@@ -341,7 +351,7 @@ class TestCorregir(Base):
         self.assertEqual(ordenito.clasificar(f, self.reglas).destino, "Docs/Uni/Redes")
         salida = self.corregir(f, self.home / "Docs/Uni/Seguridad", todas=True)
         self.assertTrue((self.home / "Docs/Uni/Seguridad/caso.docx").exists())
-        self.assertIn("pedro marte", ordenito.CONFIG.read_text().lower())
+        self.assertIn("pedro marte", ordenito.CONFIG.read_text(encoding="utf-8").lower())
         self.assertIn("La próxima vez", salida)
         # Después: otro documento del mismo autor ya va solo a Seguridad
         g = docx(self.dl / "caso2.docx", "subnetting vlan router " * 3, autor="Pedro Marte")
@@ -350,13 +360,13 @@ class TestCorregir(Base):
     def test_corregir_extiende_linea_fuertes_existente(self):
         f = self.archivo("x.txt", "algo")
         self.corregir(f, self.home / "Docs/Uni/Seguridad", pistas=["Ana Rivas"])
-        bloque = ordenito.CONFIG.read_text().split("[Docs/Uni/Seguridad]")[1].split("[")[0]
+        bloque = ordenito.CONFIG.read_text(encoding="utf-8").split("[Docs/Uni/Seguridad]")[1].split("[")[0]
         self.assertIn("fuertes: carlos ruiz, ana rivas", bloque.lower())
 
     def test_corregir_a_carpeta_nueva_crea_el_bloque(self):
         f = self.archivo("receta.txt", "algo")
         self.corregir(f, self.home / "Docs/Cocina", pistas=["Chef Juan"])
-        self.assertIn("[Docs/Cocina]\nfuertes: Chef Juan", ordenito.CONFIG.read_text())
+        self.assertIn("[Docs/Cocina]\nfuertes: Chef Juan", ordenito.CONFIG.read_text(encoding="utf-8"))
         self.assertTrue(any(r.destino == "Docs/Cocina" for r in ordenito.leer_reglas()))
 
     def test_corregir_en_su_misma_carpeta_via_enlace_no_mueve(self):
@@ -365,13 +375,16 @@ class TestCorregir(Base):
         real.mkdir(parents=True)
         f = docx(real / "tarea.docx", "subnetting")
         enlace = self.home / "atajo"
-        enlace.symlink_to(self.home)
+        try:
+            enlace.symlink_to(self.home, target_is_directory=True)
+        except OSError:  # Windows sin "modo desarrollador" no deja crear enlaces
+            self.skipTest("este sistema no permite crear enlaces simbólicos")
         self.corregir(enlace / "Docs/Uni/Redes/tarea.docx", enlace / "Docs/Uni/Redes", pistas=[])
         self.assertEqual([x.name for x in real.iterdir()], ["tarea.docx"], "no debe crear 'tarea (2).docx'")
         self.assertEqual(ordenito._historial(), [])
 
     def test_no_sugiere_nombres_de_no_sugerir(self):
-        with ordenito.CONFIG.open("a") as c:
+        with ordenito.CONFIG.open("a", encoding="utf-8") as c:
             c.write("\n[no sugerir]\nlucia fernandez\n")
         f = docx(self.dl / "t.docx", "x", autor="Lucía Fernández")
         self.assertNotIn("Lucía Fernández", ordenito.candidatas(f))
@@ -391,6 +404,230 @@ class TestCorregir(Base):
         with redirect_stdout(io.StringIO()):
             ordenito.deshacer(1)
         self.assertTrue((self.dl / "x.txt").exists())
+
+
+def armar_pdf(ruta, objetos, raiz, info=None, extra=b""):
+    """Escribe un PDF con esos objetos {número: (diccionario, stream o None)}."""
+    salida = bytearray(b"%PDF-1.7\n")
+    for n, (dic, stream) in sorted(objetos.items()):
+        salida += b"%d 0 obj\n" % n + dic
+        if stream is not None:
+            salida += b"\nstream\n" + stream + b"\nendstream"
+        salida += b"\nendobj\n"
+    salida += b"trailer\n<< /Root %d 0 R" % raiz + (b" /Info %d 0 R" % info if info else b"") + extra
+    salida += b" >>\n%%EOF\n"
+    ruta.write_bytes(bytes(salida))
+    return ruta
+
+
+def pdf_simple(ruta, lineas, autor=b"", info_extra=b""):
+    """PDF con fuente Helvetica (WinAnsi), contenido comprimido y una línea por Td."""
+    texto = b"BT /F1 12 Tf 72 720 Td " + b" 0 -14 Td ".join(lineas) + b" ET"
+    objetos = {
+        1: (b"<< /Type /Catalog /Pages 2 0 R >>", None),
+        2: (b"<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources << /Font << /F1 5 0 R >> >> >>", None),
+        3: (b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>", None),  # recursos heredados de /Pages
+        4: (b"<< /Length %d /Filter /FlateDecode >>" % len(zlib.compress(texto)), zlib.compress(texto)),
+        5: (b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>", None),
+        6: (b"<< /Author " + autor + info_extra + b" >>", None),
+    }
+    return armar_pdf(ruta, objetos, 1, 6)
+
+
+def pdf_de_word(ruta):
+    """Como los PDF que exporta Word: fuente Type0 con códigos de 2 bytes, tabla /ToUnicode,
+    una letra por TD, cada palabra en su BT, y la fuente guardada dentro de un /ObjStm."""
+    cmap = (b"begincmap 1 begincodespacerange <0000> <FFFF> endcodespacerange\n"
+            b"5 beginbfchar <0001> <0048> <0002> <006F> <0003> <006C> <0004> <0061> <0005> <004D> endbfchar\n"
+            b"2 beginbfrange <0006> <0007> [<0075> <006E>] <0008> <0008> <0064> endbfrange endcmap")
+    contenido = (b"q BT /F1 10 Tf 1 0 0 1 72 700 Tm <0001>Tj 6 0 TD <0002>Tj 5 0 TD <0003>Tj 3 0 TD <0004>Tj ET\n"
+                 b"BT /F1 10 Tf 1 0 0 1 93.8 700 Tm <00050006000700080002>Tj ET\n"
+                 b"BT /F1 10 Tf 1 0 0 1 72 680 Tm [<0001>-20<0002>] TJ ET Q")
+    fuente = b"<< /Type /Font /Subtype /Type0 /BaseFont /Calibri /Encoding /Identity-H " \
+             b"/DescendantFonts [6 0 R] /ToUnicode 7 0 R >>"
+    hija = b"<< /Type /Font /Subtype /CIDFontType2 /DW 1000 /W [1 [600 500 300 500] 5 8 550] >>"
+    cabecera = b"5 0 6 %d " % len(fuente)
+    objstm = cabecera + fuente + hija
+    objetos = {
+        1: (b"<< /Type /Catalog /Pages 2 0 R >>", None),
+        2: (b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", None),
+        3: (b"<< /Type /Page /Parent 2 0 R /Contents [4 0 R] /Resources << /Font << /F1 5 0 R >> >> >>", None),
+        4: (b"<< /Filter /FlateDecode >>", zlib.compress(contenido)),
+        7: (b"<< /Filter /FlateDecode >>", zlib.compress(cmap)),
+        8: (b"<< /Type /ObjStm /N 2 /First %d /Filter /FlateDecode >>" % len(cabecera), zlib.compress(objstm)),
+    }
+    return armar_pdf(ruta, objetos, 1)
+
+
+class TestPdf(Base):
+    def test_lee_texto_metadatos_y_tildes(self):
+        f = pdf_simple(self.dl / "a.pdf", [b"(Factura de Acme SRL) Tj", b"[(Comprobante) -300 (de pago)] TJ",
+                                           b"(Ingl\\351s \\(b\\341sico\\)) Tj"],
+                       autor=b"(Ana P\\351rez)", info_extra=b" /Title <FEFF00540061007200650061>")
+        pdf = ordenito.Pdf(f)
+        self.assertEqual(pdf.info(), {"Author": "Ana Pérez", "Title": "Tarea"})
+        self.assertEqual(pdf.texto().split("\n"), ["Factura de Acme SRL", "Comprobante de pago", "Inglés (básico)"])
+
+    def test_pdf_de_word_con_tabla_tounicode(self):
+        self.assertEqual(ordenito.Pdf(pdf_de_word(self.dl / "w.pdf")).texto().split("\n"), ["Hola Mundo", "Ho"])
+
+    def test_clasifica_pdf_sin_pdftotext(self):
+        f = pdf_simple(self.dl / "documento.pdf", [b"(Reporte semanal) Tj"], autor=b"(Carlos Ruiz)")
+        g = pdf_simple(self.dl / "otro.pdf", [b"(Pasante: reporte diario para ACME SRL) Tj"])
+        with mock.patch.object(ordenito.shutil, "which", return_value=None):
+            self.assertEqual(ordenito.clasificar(f, self.reglas).destino, "Docs/Uni/Seguridad")
+            self.assertEqual(ordenito.clasificar(g, self.reglas).destino, "Docs/Trabajo")
+            self.assertEqual(ordenito.autor(f), "Carlos Ruiz")
+
+    def test_pdf_cifrado_o_roto_no_falla(self):
+        cifrado = pdf_simple(self.dl / "c.pdf", [b"(secreto) Tj"])
+        cifrado.write_bytes(cifrado.read_bytes().replace(b" >>\n%%EOF", b" /Encrypt 9 0 R >>\n%%EOF"))
+        self.assertEqual(ordenito.Pdf(cifrado).texto(), "")
+        roto = self.dl / "roto.pdf"
+        roto.write_bytes(b"%PDF-1.4\n1 0 obj << /Type /Page /Contents 2 0 R >> endobj\n2 0 obj << /Filter "
+                         b"/FlateDecode >>\nstream\nnada comprimido\nendstream\nendobj\n")
+        with mock.patch.object(ordenito.shutil, "which", return_value=None):
+            self.assertEqual(ordenito.contenido(roto).strip(), "")
+
+    def test_bomba_dentro_de_un_pdf_no_revienta(self):
+        enorme = zlib.compress(b"BT (a) Tj ET " * 5_000_000)
+        f = armar_pdf(self.dl / "b.pdf", {1: (b"<< /Type /Page /Contents 2 0 R >>", None),
+                                          2: (b"<< /Filter /FlateDecode >>", enorme)}, 1)
+        self.assertLessEqual(len(ordenito.Pdf(f).stream(2)), ordenito.MAX_MIEMBRO)
+
+
+class TestWindows(Base):
+    """La papelera de Windows se prueba en cualquier sistema, con una carpeta de mentira."""
+
+    def setUp(self):
+        super().setUp()
+        cesto = self.home / "Papelera"
+        for p in (mock.patch.object(ordenito, "WINDOWS", True),
+                  mock.patch.object(ordenito, "papelera", lambda f=None: cesto)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_papelera_como_el_explorador(self):
+        f = self.archivo("informe.pdf", "contenido")
+        tirado = ordenito.a_papelera(f)
+        self.assertTrue(tirado.name.startswith("$R") and tirado.name.endswith(".pdf"))
+        datos = tirado.with_name("$I" + tirado.name[2:]).read_bytes()
+        version, tam, _, largo = struct.unpack("<qqqi", datos[:28])
+        self.assertEqual((version, tam), (2, len("contenido")))
+        self.assertEqual(datos[28:28 + 2 * largo].decode("utf-16-le"), str(ordenito.real(f)) + "\0")
+
+    def test_deshacer_borra_la_ficha_de_la_papelera(self):
+        f = self.archivo("informe.pdf", "contenido")
+        ordenito._registrar(f, ordenito.a_papelera(f), duplicado_de="x")
+        with redirect_stdout(io.StringIO()):
+            ordenito.deshacer(1)
+        self.assertTrue(f.exists())
+        self.assertEqual(list((self.home / "Papelera").iterdir()), [])
+
+    def test_bonito_y_destino_de_usan_barras_normales(self):
+        carpeta = self.home / "Docs" / "Uni" / "Nueva"
+        self.assertEqual(ordenito.bonito(carpeta), "~/Docs/Uni/Nueva")
+        self.assertEqual(ordenito.destino_de(carpeta), "Docs/Uni/Nueva")
+
+
+class TestCarpetas(Base):
+    def conf(self, texto):
+        with ordenito.CONFIG.open("a", encoding="utf-8") as c:
+            c.write("\n" + texto + "\n")
+
+    def ordenar(self, **kw):
+        with redirect_stdout(io.StringIO()):
+            return ordenito.ordenar(esperar=False, avisar=False, **kw)
+
+    def test_reglas_guardadas_con_bom_del_bloc_de_notas(self):
+        ordenito.CONFIG.write_text(REGLAS.lstrip(), encoding="utf-8-sig")
+        self.assertEqual(ordenito.leer_reglas()[0].destino, "Docs/Uni/Redes")
+
+    def test_nunca_mueve_ocultos_ni_accesos_directos(self):
+        for nombre in ("desktop.ini", "Fortnite.url", "Stremio.lnk", "Thumbs.db"):
+            self.archivo(nombre, "english grammar")
+        self.assertEqual(self.ordenar(), 0)
+
+    def test_vigila_otras_carpetas(self):
+        escritorio = self.home / "Escritorio"
+        escritorio.mkdir()
+        self.conf("[vigilar]\nEscritorio, ~/no-existe")
+        (escritorio / "tarea.txt").write_text("english grammar", encoding="utf-8")
+        (escritorio / "Juego.lnk").write_text("english grammar", encoding="utf-8")
+        self.assertEqual([c.name for c in ordenito.carpetas_vigiladas()][:2], ["Downloads", "Escritorio"])
+        self.assertEqual(self.ordenar(), 1)
+        self.assertTrue((self.home / "Docs/Uni/Ingles/tarea.txt").exists())
+        self.assertTrue((escritorio / "Juego.lnk").exists(), "los accesos directos no se tocan")
+        self.assertFalse(any(r.destino == "vigilar" for r in ordenito.leer_reglas()))
+
+    def test_carpeta_vigilada_que_es_destino_no_se_reordena(self):
+        fotos = self.home / "Fotos"
+        fotos.mkdir()
+        (fotos / "playa.jpg").write_text("x")
+        self.conf("[vigilar]\nFotos")
+        self.assertEqual(self.ordenar(), 0)
+        self.assertEqual([f.name for f in fotos.iterdir()], ["playa.jpg"], "no debe crear 'playa (2).jpg'")
+
+    def test_archivo_bloqueado_no_frena_a_los_demas(self):
+        self.archivo("a.txt", "english grammar")
+        self.archivo("b.txt", "english grammar")
+        real_move, fallos = ordenito.shutil.move, []
+
+        def mover(desde, hacia):
+            if desde.endswith("a.txt"):
+                raise PermissionError("lo tiene abierto el navegador")
+            return real_move(desde, hacia)
+
+        with mock.patch.object(ordenito.shutil, "move", mover):
+            self.assertEqual(self.ordenar(fallos=fallos), 1)
+        self.assertEqual([f.name for f, _ in fallos], ["a.txt"])
+
+    def test_ignorados_viejos_solo_con_nombre_siguen_valiendo(self):
+        self.archivo("foto.jpg")
+        ordenito._guardar_json("ignorados.json", ["foto.jpg"])
+        self.assertEqual(self.ordenar(), 0)
+
+    def test_limpieza_apagada_por_defecto(self):
+        self.assertFalse(ordenito.ajustes_limpieza()[0])
+        self.assertEqual(ordenito.limpiar(avisar=False), (0, 0))
+
+    def test_limpieza_manda_instaladores_viejos_a_la_papelera(self):
+        self.conf("[limpieza]\ndias: 10\nextensiones: exe, iso")
+        self.assertEqual(ordenito.ajustes_limpieza()[:2], (True, 10))
+        (self.dl / "Instaladores").mkdir()
+        viejo = self.dl / "Instaladores" / "viejo.exe"
+        viejo.write_text("x")
+        self.archivo("nuevo.exe")
+        self.archivo("viejo.pdf")
+        hace = time.time() - 30 * 86_400
+        with mock.patch.object(ordenito, "_llegada", lambda f: hace if f.stem == "viejo" else time.time()), \
+                mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(self.home / "share")}):
+            self.assertEqual(ordenito.para_limpiar(), [viejo])
+            self.assertEqual(ordenito.limpiar(avisar=False)[0], 1)
+            self.assertFalse(viejo.exists())
+            self.assertTrue((self.dl / "viejo.pdf").exists(), "solo los tipos de la lista")
+            with redirect_stdout(io.StringIO()) as salida:
+                ordenito.historial()
+                ordenito.deshacer(1)
+        self.assertIn("limpieza", salida.getvalue())
+        self.assertTrue(viejo.exists())
+
+    def test_limpieza_se_puede_apagar_sin_perder_los_dias(self):
+        self.conf("[limpieza]\ndias: 45\napagada")
+        self.assertEqual(ordenito.ajustes_limpieza()[:2], (False, 45))
+
+    def test_vigilar_ordena_y_termina_al_pedirselo(self):
+        self.archivo("tarea.txt", "english grammar")
+        ordenito.vigilar(pausa=0.01, vueltas=2)
+        self.assertTrue((self.home / "Docs/Uni/Ingles/tarea.txt").exists())
+        self.assertFalse((ordenito.ESTADO / "vigilante.pid").exists(), "al salir borra su marca")
+
+    def test_terminado_no_espera_si_hace_rato_que_no_cambia(self):
+        f = self.archivo("viejo.txt", "x")
+        os.utime(f, (time.time() - 60, time.time() - 60))
+        inicio = time.time()
+        self.assertTrue(ordenito.terminado(f))
+        self.assertLess(time.time() - inicio, 1)
 
 
 class TestEjemplo(unittest.TestCase):

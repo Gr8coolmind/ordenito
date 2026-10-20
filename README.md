@@ -9,6 +9,7 @@ Ordenito lee el nombre *y el contenido* de cada archivo que descargas y lo lleva
 ![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-systemd-FCC624?logo=linux&logoColor=black)
 ![macOS](https://img.shields.io/badge/macOS-launchd-000000?logo=apple&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?logo=windows&logoColor=white)
 ![Sin dependencias](https://img.shields.io/badge/dependencias-0-success)
 [![Licencia MIT](https://img.shields.io/badge/licencia-MIT-blue)](LICENSE)
 
@@ -30,6 +31,8 @@ La mayoría de los organizadores solo miran la extensión: todos los PDF juntos,
 
 <p align="center"><img src="docs/app-descargas.png" alt="La app de Ordenito mostrando a dónde irá cada archivo de Descargas" width="820"></p>
 
+> 🪟 **¿Tienes Windows?** Mira [Instalación en Windows](#-en-windows): doble clic en `instalar.cmd` y listo.
+>
 > 🍎 **¿Tienes Mac?** Sigue el **[tutorial paso a paso para macOS](docs/macos.md)**: está pensado para alguien que nunca ha usado la Terminal.
 
 ## ✨ Qué lo hace distinto
@@ -37,7 +40,7 @@ La mayoría de los organizadores solo miran la extensión: todos los PDF juntos,
 | | |
 |---|---|
 | 🧠 **Lee el contenido** | Word, PowerPoint, Excel, LibreOffice, PDF, texto, código… y hasta los nombres de lo que trae un `.zip` (sin descomprimirlo). |
-| ⚡ **Al instante** | Un servicio (systemd en Linux, launchd en Mac) vigila tu carpeta de descargas. Unos 2 segundos después de terminar una descarga, el archivo ya está en su lugar. |
+| ⚡ **Al instante** | Un servicio (systemd en Linux, launchd en Mac, un vigilante que arranca con tu sesión en Windows) vigila tu carpeta de descargas. Unos 2 segundos después de terminar una descarga, el archivo ya está en su lugar. |
 | 🪪 **Reconoce al dueño del documento** | Lee el autor, el título, los encabezados y la portada. Si una tarea es *del* profesor de Seguridad, va a Seguridad, aunque hable mucho de redes. |
 | 🪆 **Entiende subcarpetas** | Si un archivo encaja en `Universidad` y también en `Universidad/Redes`, va a la más específica. |
 | 🃏 **Comodines** | `[*/Proyecto Final]` crea esa subcarpeta dentro de *cualquier* materia que gane. |
@@ -48,7 +51,11 @@ La mayoría de los organizadores solo miran la extensión: todos los PDF juntos,
 | 👯 **Sin duplicados** | Si descargas algo que ya tenías, no guarda una copia `(1)`: la manda a la papelera y te avisa. `ordenito duplicados` encuentra las copias que ya tienes. |
 | ↩️ **Se puede deshacer** | `ordenito deshacer` devuelve el archivo, y Ordenito no lo vuelve a mover. |
 | 🔒 **100 % local** | No usa internet ni IA en la nube. Nada de tus documentos sale de tu computadora. |
-| 🪶 **Cero dependencias** | Solo Python y su biblioteca estándar (la app usa Tkinter, que viene con Python). `pdftotext` es opcional. |
+| 📄 **Lee PDF sin instalar nada** | Trae su propio lector de PDF (también los que exporta Word). Si tienes `pdftotext`, lo usa. |
+| 🖥️ **Más carpetas** | Además de Descargas, puede ordenar el Escritorio u otras carpetas de "entrada" (bloque `[vigilar]`). |
+| 🧹 **Limpieza de Descargas** | Opcional: manda a la papelera los instaladores, ISOs y torrents con más de N días (bloque `[limpieza]`). |
+| 🌙 **Modo oscuro** | La app sigue el tema del sistema, o lo eliges en Ajustes. |
+| 🪶 **Cero dependencias** | Solo Python y su biblioteca estándar (la app usa Tkinter, que viene con Python). |
 
 ## 🚀 Instalación
 
@@ -77,6 +84,16 @@ No necesita `sudo` y funciona igual en **Linux** y **macOS**. El instalador:
 Después vuelve a ejecutar `./instalar.sh`. Sin Tkinter, el servicio automático y el comando `ordenito` funcionan igual.
 
 > 💡 Para que lea los PDF instala `pdftotext`: `sudo dnf install poppler-utils` · `sudo apt install poppler-utils` · `sudo pacman -S poppler` · Mac: `brew install poppler`
+
+### 🪟 En Windows
+
+1. Instala Python 3.9 o más nuevo si no lo tienes: `winget install Python.Python.3.12` (o desde [python.org](https://www.python.org/downloads/)).
+2. Descarga Ordenito (`git clone https://github.com/Gr8coolmind/ordenito.git` o **Code → Download ZIP**).
+3. Doble clic en **`instalar.cmd`**.
+
+No necesita administrador. El instalador copia Ordenito a `%LOCALAPPDATA%\Programs\Ordenito`, agrega el comando `ordenito` a tu terminal, pone **Ordenito** en el menú Inicio, crea tus reglas en `%APPDATA%\ordenito\reglas.conf` y enciende el vigilante (arranca solo al iniciar sesión, sin ventanas). Lo repetido va a la **Papelera de reciclaje** de verdad: se puede restaurar desde ahí o con `ordenito deshacer`.
+
+Para quitarlo: `desinstalar.cmd` (con `/todo` borra también tus reglas e historial).
 
 ### 🍎 En Mac
 
@@ -150,6 +167,15 @@ extensiones: pine, txt
 # Respaldo por tipo: solo extensiones, sin palabras
 [Videos]
 extensiones: mp4, mkv, webm
+
+# Ordenar también estas carpetas, además de Descargas
+[vigilar]
+Desktop
+
+# Instaladores con más de 30 días en Descargas → papelera (escribe 'apagada' para pausarla)
+[limpieza]
+dias: 30
+extensiones: exe, msi, iso, torrent
 ```
 
 **Consejos para buenas reglas**
@@ -173,6 +199,7 @@ El [archivo de ejemplo](reglas.ejemplo.conf) trae categorías listas para estudi
 | `ordenito corregir ARCHIVO CARPETA` | Mueve un archivo mal clasificado y aprende la pista que faltaba. `--todas` acepta todas las sugerencias y `--pista TEXTO` agrega una a mano. |
 | `ordenito-app` | Abre la app con ventana. |
 | `ordenito servicio [encender\|apagar]` | Enciende, pausa o muestra el servicio automático. |
+| `ordenito limpiar [--simular] [--dias N]` | Manda a la papelera los instaladores viejos de Descargas (o solo muestra cuáles). |
 | `ordenito duplicados [CARPETA]` | Lista archivos idénticos (compara el contenido, no el nombre). Con `--papelera` quita las copias y se queda con el nombre más limpio. |
 
 ```console
@@ -233,7 +260,7 @@ Tus archivos se quedan donde Ordenito los dejó.
 <details>
 <summary><b>¿En qué sistemas funciona?</b></summary>
 
-En **macOS** (Intel y Apple Silicon) y en cualquier **Linux con systemd** (Fedora, Ubuntu, Debian, Arch, Bazzite, Silverblue…), con cualquier escritorio. En Linux, las notificaciones usan `notify-send`; en Mac, el centro de notificaciones. En cada cambio se prueba en Linux y en un Mac real, incluida la instalación con launchd.
+En **Windows 10 y 11**, en **macOS** (Intel y Apple Silicon) y en cualquier **Linux con systemd** (Fedora, Ubuntu, Debian, Arch, Bazzite, Silverblue…), con cualquier escritorio. En Linux, las notificaciones usan `notify-send`; en Mac, el centro de notificaciones. En cada cambio se prueba en Linux y en un Mac real, incluida la instalación con launchd.
 </details>
 
 <details>

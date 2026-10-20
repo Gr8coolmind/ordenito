@@ -10,6 +10,7 @@ Comandos:
   ordenito deshacer [N]       devuelve a su lugar los últimos N archivos movidos
   ordenito corregir ARCHIVO CARPETA   lo mueve donde va y aprende la pista que faltaba
   ordenito duplicados [CARPETA]       busca copias idénticas (--papelera para quitarlas)
+  ordenito limpiar                    manda a la papelera los instaladores viejos de Descargas
 """
 from __future__ import annotations
 
@@ -19,24 +20,42 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
 import unicodedata
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 HOME = Path.home()
 MAC = sys.platform == "darwin"
-CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "ordenito" / "reglas.conf"
-ESTADO = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local" / "state")) / "ordenito"
+WINDOWS = sys.platform == "win32"
 
-EN_CURSO = {".crdownload", ".part", ".tmp", ".download", ".opdownload"}
+
+def _carpeta_config(xdg, windows, unix):
+    """En Windows: %APPDATA% / %LOCALAPPDATA%. En Linux y Mac: las rutas XDG de siempre."""
+    if os.environ.get(xdg):
+        return Path(os.environ[xdg])
+    if WINDOWS and os.environ.get(windows):
+        return Path(os.environ[windows])
+    return HOME / unix
+
+
+CONFIG = _carpeta_config("XDG_CONFIG_HOME", "APPDATA", ".config") / "ordenito" / "reglas.conf"
+ESTADO = _carpeta_config("XDG_STATE_HOME", "LOCALAPPDATA", ".local/state") / "ordenito"
+SIN_VENTANA = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # en Windows, que no parpadee una consola
+
+EN_CURSO = {".crdownload", ".part", ".tmp", ".download", ".opdownload", ".partial"}
+# Accesos directos y archivos del sistema: nunca se mueven (el Escritorio está lleno de ellos)
+NUNCA = {".lnk", ".url"}
+DEL_SISTEMA = {"desktop.ini", "thumbs.db", ".ds_store", "icon\r"}
 OFIMATICA = {".docx", ".pptx", ".xlsx", ".odt", ".odp", ".ods"}
 TEXTO = {".txt", ".md", ".csv", ".pine", ".php", ".js", ".ts", ".py", ".sh", ".sql",
          ".html", ".css", ".json"}
@@ -74,14 +93,49 @@ class Regla:
 
 
 NO_SUGERIR = "no sugerir"   # [no sugerir]: tu nombre y el de tus compañeros (no es una carpeta)
+VIGILAR = "vigilar"         # [vigilar]: otras carpetas que se ordenan además de Descargas
+LIMPIEZA = "limpieza"       # [limpieza]: instaladores viejos de Descargas que van a la papelera
+ESPECIALES = {NO_SUGERIR, VIGILAR, LIMPIEZA}
+LIMPIEZA_TIPOS = ["exe", "msi", "msix", "appimage", "rpm", "deb", "flatpakref", "dmg", "pkg", "apk",
+                  "iso", "img", "torrent"]
+LIMPIEZA_DIAS = 30
 
 
 def leer_reglas(ruta=None):
-    return [r for r in _bloques(ruta) if r.destino.lower() != NO_SUGERIR]
+    return [r for r in _bloques(ruta) if r.destino.lower() not in ESPECIALES]
+
+
+def _especial(nombre, ruta=None):
+    return next((r for r in _bloques(ruta) if r.destino.lower() == nombre), None)
 
 
 def no_sugerir(ruta=None):
-    return {p for r in _bloques(ruta) if r.destino.lower() == NO_SUGERIR for p in r.palabras + r.fuertes}
+    r = _especial(NO_SUGERIR, ruta)
+    return set(r.palabras + r.fuertes) if r else set()
+
+
+def carpetas_vigiladas(ruta=None):
+    """Descargas y las carpetas de [vigilar] (rutas tal como se escribieron: ~/Desktop, Desktop…)."""
+    dl = carpeta_descargas()
+    r = _especial(VIGILAR, ruta) if (ruta or CONFIG).exists() else None
+    extra = [ruta_destino(p) for p in (r.palabras_texto if r else [])]
+    vistas, todas = set(), []
+    for c in [dl] + extra:
+        if real(c) not in vistas:
+            vistas.add(real(c))
+            todas.append(c)
+    return todas
+
+
+def ajustes_limpieza(ruta=None):
+    """(activa, días, extensiones). Se activa escribiendo un bloque [limpieza] con 'dias: N'."""
+    r = _especial(LIMPIEZA, ruta) if (ruta or CONFIG).exists() else None
+    if not r:
+        return False, LIMPIEZA_DIAS, {"." + e for e in LIMPIEZA_TIPOS}
+    dias = next((int(m.group(1)) for p in r.palabras_texto
+                 for m in [re.fullmatch(r"d[ií]as\s*:\s*(\d+)", p.strip(), re.I)] if m), LIMPIEZA_DIAS)
+    apagada = any(p.strip().lower() in ("apagada", "desactivada", "no") for p in r.palabras_texto)
+    return not apagada, max(dias, 1), r.extensiones or {"." + e for e in LIMPIEZA_TIPOS}
 
 
 def _bloques(ruta=None):
@@ -90,7 +144,7 @@ def _bloques(ruta=None):
         sys.exit(f"No encuentro las reglas en {ruta}.\n"
                  "Ejecuta ./instalar.sh o copia reglas.ejemplo.conf a esa ruta.")
     reglas = []
-    for n, linea in enumerate(ruta.read_text(encoding="utf-8").splitlines(), 1):
+    for n, linea in enumerate(ruta.read_text(encoding="utf-8-sig").splitlines(), 1):
         linea = linea.split("#", 1)[0].strip()
         if not linea:
             continue
@@ -122,9 +176,33 @@ def normalizar(texto):
     return re.sub(r"[-_\s]+", " ", texto)
 
 
+_ATRIBUTOS_OCULTO = 0x2 | 0x4            # FILE_ATTRIBUTE_HIDDEN | SYSTEM
+_ATRIBUTOS_NUBE = 0x1000 | 0x40000 | 0x400000   # OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS
+
+
+def oculto(f):
+    """Archivos que Ordenito nunca toca: ocultos, del sistema y accesos directos."""
+    if f.name.startswith(".") or f.name.lower() in DEL_SISTEMA or f.suffix.lower() in NUNCA:
+        return True
+    try:
+        return bool(getattr(f.stat(), "st_file_attributes", 0) & _ATRIBUTOS_OCULTO)
+    except OSError:
+        return True
+
+
+def en_la_nube(f):
+    """Archivo de OneDrive/iCloud que solo está en la nube: abrirlo lo descargaría entero."""
+    try:
+        return bool(getattr(f.stat(), "st_file_attributes", 0) & _ATRIBUTOS_NUBE)
+    except OSError:
+        return False
+
+
 def contenido(f):
     """Texto legible del archivo. Nunca falla: si no se puede leer, devuelve ''."""
     ext = f.suffix.lower()
+    if en_la_nube(f):
+        return ""
     try:
         if ext in OFIMATICA:
             with zipfile.ZipFile(f) as z:
@@ -143,12 +221,16 @@ def contenido(f):
         if ext == ".pdf" and shutil.which("pdftotext"):
             meta = ""
             if shutil.which("pdfinfo"):
-                info = subprocess.run(["pdfinfo", "--", str(f)], capture_output=True, text=True, timeout=10)
+                info = subprocess.run(["pdfinfo", "--", str(f)], capture_output=True, text=True, timeout=10,
+                                      creationflags=SIN_VENTANA)
                 meta = " ".join(l.split(":", 1)[1] for l in info.stdout.splitlines()
                                 if l.startswith(("Title:", "Author:", "Subject:", "Keywords:")))
             r = subprocess.run(["pdftotext", "-l", "5", "--", str(f), "-"],
-                               capture_output=True, text=True, timeout=20)
+                               capture_output=True, text=True, timeout=20, creationflags=SIN_VENTANA)
             return meta + " " + r.stdout
+        if ext == ".pdf":  # sin pdftotext (lo normal en Windows): el lector propio
+            pdf = Pdf(f)
+            return " ".join(v for v in pdf.info().values()) + "\n" + pdf.texto()
         if ext in TEXTO:
             with f.open(encoding="utf-8", errors="ignore") as t:
                 return t.read(MAX_TEXTO)
@@ -160,6 +242,437 @@ def contenido(f):
 def _leer_miembro(z, nombre):
     with z.open(nombre) as m:
         return m.read(MAX_MIEMBRO).decode("utf-8", "ignore")
+
+
+# ───────────────────── PDF sin programas extra ─────────────────────
+# Un lector pequeño: autor y título, y el texto de las primeras páginas (incluidos los PDF de Word,
+# que guardan las letras como códigos y traen una tabla /ToUnicode para traducirlos).
+
+MAX_PDF = 40_000_000   # bytes: un PDF más grande solo se juzga por el nombre
+PAGINAS_PDF = 5
+_OBJ = re.compile(rb"(\d+)\s+(\d+)\s+obj\b")
+_DELIM = b"()<>[]{}/%"
+
+
+class Pdf:
+    def __init__(self, ruta):
+        self.objetos, self._decodificados, self.datos, self.cifrado = {}, {}, b"", False
+        try:
+            if ruta.stat().st_size <= MAX_PDF:
+                self.datos = ruta.read_bytes()
+        except OSError:
+            return
+        # Cifrado: el contenido no se puede leer sin la clave
+        self.cifrado = re.search(rb"/Encrypt\s+\d+\s+\d+\s+R", self.datos) is not None
+        marcas = list(_OBJ.finditer(self.datos))
+        for i, m in enumerate(marcas):
+            fin = marcas[i + 1].start() if i + 1 < len(marcas) else len(self.datos)
+            cuerpo = self.datos[m.end():fin]
+            s = re.search(rb"\bstream\r?\n", cuerpo)
+            if s:
+                final = cuerpo.rfind(b"endstream")
+                self.objetos[int(m.group(1))] = (cuerpo[:s.start()], cuerpo[s.end():final if final > 0 else None])
+            else:
+                self.objetos[int(m.group(1))] = (cuerpo.split(b"endobj", 1)[0], None)
+        for num, (dic, crudo) in list(self.objetos.items()):  # objetos guardados dentro de /ObjStm
+            if crudo is not None and re.search(rb"/Type\s*/ObjStm", dic):
+                self._abrir_objstm(num, dic)
+
+    def _abrir_objstm(self, num, dic):
+        datos, primero = self.stream(num), self._entero(dic, b"First")
+        if not datos or primero is None:
+            return
+        numeros = [int(x) for x in re.findall(rb"\d+", datos[:primero])]
+        pares = list(zip(numeros[::2], numeros[1::2]))
+        for k, (n, desde) in enumerate(pares):
+            hasta = pares[k + 1][1] if k + 1 < len(pares) else len(datos) - primero
+            self.objetos.setdefault(n, (datos[primero + desde:primero + hasta], None))
+
+    @staticmethod
+    def _entero(dic, clave):
+        m = re.search(rb"/" + clave + rb"\s+(\d+)(?!\s+\d+\s+R)", dic)
+        return int(m.group(1)) if m else None
+
+    def stream(self, num):
+        """Contenido descomprimido de un objeto con stream (solo FlateDecode o sin filtro)."""
+        if num in self._decodificados:
+            return self._decodificados[num]
+        dic, crudo = self.objetos.get(num, (b"", None))
+        datos = None
+        if crudo is not None:
+            m = re.search(rb"/Filter\s*(\[[^\]]*\]|/\w+)", dic)
+            filtros = re.findall(rb"/(\w+)", m.group(1)) if m else []
+            try:
+                if not filtros:
+                    datos = crudo[:MAX_MIEMBRO]
+                elif filtros in ([b"FlateDecode"], [b"Fl"]):
+                    datos = zlib.decompressobj().decompress(crudo, MAX_MIEMBRO)  # protege de bombas
+            except zlib.error:
+                datos = None
+        self._decodificados[num] = datos
+        return datos
+
+    def valor(self, dic, clave):
+        """El valor de /clave en un diccionario, siguiendo una referencia 'N 0 R' si la hay."""
+        m = re.search(rb"/" + clave + rb"(?=[\s/<\[(])\s*", dic)
+        if not m:
+            return None
+        resto = dic[m.end():]
+        ref = re.match(rb"(\d+)\s+\d+\s+R", resto)
+        if ref:
+            return self.objetos.get(int(ref.group(1)), (None, None))[0]
+        if resto.startswith(b"<<"):
+            return _balanceado(resto, b"<<", b">>")
+        if resto.startswith(b"["):
+            return _balanceado(resto, b"[", b"]")
+        return re.match(rb"[^\s/<>\[\]]*", resto).group(0)
+
+    def info(self):
+        """{'Title': …, 'Author': …} del diccionario /Info."""
+        if self.cifrado:
+            return {}
+        refs = re.findall(rb"/Info\s+(\d+)\s+\d+\s+R", self.datos)
+        dic = self.objetos.get(int(refs[-1]), (b"", None))[0] if refs else b""
+        datos = {}
+        for clave in ("Title", "Author", "Subject", "Keywords"):
+            m = re.search(rb"/" + clave.encode() + rb"\s*(\((?:\\.|[^\\])*?\)|<[0-9A-Fa-f\s]*>)", dic or b"", re.S)
+            if m:
+                cadena = m.group(1)
+                crudo = _literal(cadena, 0)[0] if cadena.startswith(b"(") else _hex(cadena[1:-1])
+                texto = _cadena_pdf(crudo).strip()
+                if texto:
+                    datos[clave] = texto
+        return datos
+
+    def paginas(self):
+        """[(contenido, recursos)] de las primeras páginas, en orden."""
+        raices = re.findall(rb"/Root\s+(\d+)\s+\d+\s+R", self.datos)
+        hojas = []
+        if raices:
+            catalogo = self.objetos.get(int(raices[-1]), (b"", None))[0]
+            m = re.search(rb"/Pages\s+(\d+)\s+\d+\s+R", catalogo or b"")
+            if m:
+                self._recorrer(int(m.group(1)), None, hojas, set())
+        if not hojas:  # índice roto: las páginas en el orden del archivo
+            hojas = [(n, self.valor(d, b"Resources")) for n, (d, _) in sorted(self.objetos.items())
+                     if re.search(rb"/Type\s*/Page(?![a-zA-Z])", d)]
+        return hojas[:PAGINAS_PDF]
+
+    def _recorrer(self, num, recursos, hojas, vistos):
+        if num in vistos or len(hojas) >= PAGINAS_PDF or len(vistos) > 5000:
+            return
+        vistos.add(num)
+        dic = self.objetos.get(num, (b"", None))[0] or b""
+        recursos = self.valor(dic, b"Resources") or recursos  # se heredan de /Pages
+        kids = self.valor(dic, b"Kids")
+        if kids is not None and not re.search(rb"/Type\s*/Page(?![a-zA-Z])", dic):
+            for k in re.findall(rb"(\d+)\s+\d+\s+R", kids):
+                self._recorrer(int(k), recursos, hojas, vistos)
+        else:
+            hojas.append((num, recursos))
+
+    def _fuentes(self, recursos):
+        """{nombre de fuente: Fuente} de unos recursos."""
+        fuentes = {}
+        tabla_fuentes = self.valor(recursos or b"", b"Font") or b""
+        for nombre, ref in re.findall(rb"/([^\s/<>\[\]()]+)\s+(\d+)\s+\d+\s+R", tabla_fuentes):
+            dic = self.objetos.get(int(ref), (b"", None))[0] or b""
+            m = re.search(rb"/ToUnicode\s+(\d+)\s+\d+\s+R", dic)
+            fuente = Fuente(_cmap(self.stream(int(m.group(1))) or b"") if m else {})
+            if re.search(rb"/Subtype\s*/Type0", dic):  # letras de 2 bytes y anchos en la fuente descendiente
+                fuente.ancho_codigo = 2
+                desc = self.valor(dic, b"DescendantFonts") or b""
+                r = re.search(rb"(\d+)\s+\d+\s+R", desc)
+                hija = self.objetos.get(int(r.group(1)), (b"", None))[0] or b"" if r else desc
+                fuente.defecto = float(self._entero(hija, b"DW") or 1000)
+                w = self.valor(hija, b"W")
+                lista = next((v for t, v in _fichas(w) if t == "dato" and isinstance(v, list)), []) if w else []
+                k = 0
+                while k < len(lista):
+                    if k + 1 < len(lista) and isinstance(lista[k + 1], list):
+                        for j, ancho in enumerate(lista[k + 1]):
+                            fuente.anchos[int(lista[k]) + j] = ancho
+                        k += 2
+                    elif k + 2 < len(lista):
+                        for c in range(int(lista[k]), min(int(lista[k + 1]), int(lista[k]) + 0xFFFF) + 1):
+                            fuente.anchos[c] = lista[k + 2]
+                        k += 3
+                    else:
+                        break
+            else:
+                primero = self._entero(dic, b"FirstChar") or 0
+                w = self.valor(dic, b"Widths")
+                lista = next((v for t, v in _fichas(w) if t == "dato" and isinstance(v, list)), []) if w else []
+                fuente.anchos = {primero + j: a for j, a in enumerate(lista) if isinstance(a, float)}
+            fuentes[nombre] = fuente
+        return fuentes
+
+    def _formularios(self, recursos):
+        """{nombre: número de objeto} de los XObject de tipo Form (texto dentro de "dibujos")."""
+        xo = self.valor(recursos or b"", b"XObject") or b""
+        return {n: int(r) for n, r in re.findall(rb"/([^\s/<>\[\]()]+)\s+(\d+)\s+\d+\s+R", xo)
+                if re.search(rb"/Subtype\s*/Form", self.objetos.get(int(r), (b"", None))[0] or b"")}
+
+    def texto(self):
+        if self.cifrado or not self.datos:
+            return ""
+        partes, total = [], 0
+        for num, recursos in self.paginas():
+            dic = self.objetos.get(num, (b"", None))[0] or b""
+            m = re.search(rb"/Contents\s*(\[[^\]]*\]|\d+\s+\d+\s+R)", dic)
+            refs = re.findall(rb"(\d+)\s+\d+\s+R", m.group(1)) if m else []
+            contenido = b"\n".join(self.stream(int(r)) or b"" for r in refs)
+            partes.append(self._leer_contenido(contenido, recursos, 0))
+            total += len(partes[-1])
+            if total > MAX_TEXTO:
+                break
+        return "\n".join(partes)[:MAX_TEXTO]
+
+    def _leer_contenido(self, contenido, recursos, nivel):
+        fuentes, formularios = self._fuentes(recursos), self._formularios(recursos)
+        t = Escritor()
+        pila = []
+        for tipo, valor in _fichas(contenido):
+            if tipo != "op":
+                pila.append(valor)
+                continue
+            num = [v for v in pila if isinstance(v, float)]
+            if valor == "Tf" and len(pila) >= 2 and isinstance(pila[-2], str) and num:
+                t.fuente, t.tam = fuentes.get(pila[-2].encode("latin-1"), Fuente({})), num[-1]
+            elif valor == "Tj" and pila and isinstance(pila[-1], bytes):
+                t.mostrar(pila[-1])
+            elif valor in ("'", '"') and pila and isinstance(pila[-1], bytes):
+                t.mover(0, -t.interlineado)
+                t.mostrar(pila[-1])
+            elif valor == "TJ" and pila and isinstance(pila[-1], list):
+                for parte in pila[-1]:
+                    if isinstance(parte, bytes):
+                        t.mostrar(parte)
+                    elif isinstance(parte, float):
+                        t.avanzar(-parte / 1000 * t.tam)
+            elif valor in ("Td", "TD") and len(num) >= 2:
+                if valor == "TD":
+                    t.interlineado = -num[-1]
+                t.mover(num[-2], num[-1])
+            elif valor == "T*":
+                t.mover(0, -t.interlineado)
+            elif valor == "TL" and num:
+                t.interlineado = num[-1]
+            elif valor == "Tm" and len(num) >= 6:
+                t.linea = num[-6:]
+                t.matriz = list(t.linea)
+            elif valor == "BT":
+                t.linea, t.matriz = [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0]
+            elif valor == "Do" and pila and isinstance(pila[-1], str) and nivel < 3:
+                forma = formularios.get(pila[-1].encode("latin-1"))
+                if forma is not None:
+                    dic = self.objetos[forma][0]
+                    t.salida.append("\n" + self._leer_contenido(self.stream(forma) or b"",
+                                                                self.valor(dic, b"Resources") or recursos,
+                                                                nivel + 1) + "\n")
+                    t.fin = None
+            pila.clear()
+        return re.sub(r"[ \t]+", " ", "".join(t.salida))
+
+
+class Fuente:
+    def __init__(self, tabla):
+        self.tabla, self.anchos, self.defecto, self.ancho_codigo = tabla, {}, 500.0, 1
+
+    def letras(self, crudo):
+        """[(texto, ancho en milésimas)] de una cadena."""
+        salida, i = [], 0
+        largos = sorted({len(k) for k in self.tabla}, reverse=True) or [self.ancho_codigo]
+        while i < len(crudo):
+            largo = next((n for n in largos if crudo[i:i + n] in self.tabla), self.ancho_codigo)
+            codigo = crudo[i:i + largo]
+            if self.tabla:
+                texto = self.tabla.get(codigo, "")
+            else:  # sin tabla: una letra por byte (WinAnsi); los códigos de 2 bytes no se pueden leer
+                texto = codigo.decode("cp1252", "ignore") if largo == 1 else ""
+            salida.append((texto, self.anchos.get(int.from_bytes(codigo, "big"), self.defecto)))
+            i += largo
+        return salida
+
+
+class Escritor:
+    """Sigue la posición del texto en la página para saber dónde van espacios y saltos de línea."""
+
+    def __init__(self):
+        self.salida, self.fuente, self.tam, self.interlineado = [], Fuente({}), 12.0, 0.0
+        self.linea, self.matriz = [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0]
+        self.fin = None   # (x, y, tamaño) donde terminó el último texto
+
+    def _punto(self):
+        return self.matriz[4], self.matriz[5]
+
+    def _escala(self):
+        a, b = self.matriz[0], self.matriz[1]
+        return (a * a + b * b) ** 0.5 or 1.0
+
+    def mover(self, tx, ty):
+        a, b, c, d, e, f = self.linea
+        self.linea = [a, b, c, d, e + tx * a + ty * c, f + tx * b + ty * d]
+        self.matriz = list(self.linea)
+
+    def avanzar(self, dx):
+        a, b = self.matriz[0], self.matriz[1]
+        self.matriz[4] += dx * a
+        self.matriz[5] += dx * b
+
+    def mostrar(self, crudo):
+        x, y = self._punto()
+        alto = abs(self.tam) * self._escala()
+        if self.fin is not None:
+            fx, fy, falto = self.fin
+            if abs(y - fy) > max(alto, falto) * 0.5:
+                self.salida.append("\n")
+            elif x - fx > max(alto, falto) * 0.15 or fx - x > max(alto, falto) * 2:
+                self.salida.append(" ")
+        for texto, ancho in self.fuente.letras(crudo):
+            self.salida.append(texto)
+            self.avanzar(ancho / 1000 * self.tam)
+        x, y = self._punto()
+        self.fin = (x, y, alto)
+
+
+def _balanceado(datos, abre, cierra):
+    nivel, i = 0, 0
+    while i < len(datos):
+        if datos.startswith(abre, i):
+            nivel, i = nivel + 1, i + len(abre)
+        elif datos.startswith(cierra, i):
+            nivel, i = nivel - 1, i + len(cierra)
+            if nivel == 0:
+                return datos[:i]
+        else:
+            i += 1
+    return datos
+
+
+def _literal(datos, i):
+    """Cadena (…) de PDF desde la posición i. -> (bytes, posición siguiente)"""
+    escapes = {ord("n"): b"\n", ord("r"): b"\r", ord("t"): b"\t", ord("b"): b"\b", ord("f"): b"\f"}
+    salida, nivel, i = bytearray(), 1, i + 1
+    while i < len(datos) and nivel:
+        c = datos[i]
+        if c == 0x5C:  # barra invertida
+            i += 1
+            if i >= len(datos):
+                break
+            c = datos[i]
+            if c in escapes:
+                salida += escapes[c]
+            elif 0x30 <= c <= 0x37:  # octal \ddd
+                m = re.match(rb"[0-7]{1,3}", datos[i:i + 3])
+                salida.append(int(m.group(0), 8) & 0xFF)
+                i += len(m.group(0)) - 1
+            elif c not in (0x0A, 0x0D):
+                salida.append(c)
+        elif c == 0x28:
+            nivel += 1
+            salida.append(c)
+        elif c == 0x29:
+            nivel -= 1
+            if nivel:
+                salida.append(c)
+        else:
+            salida.append(c)
+        i += 1
+    return bytes(salida), i
+
+
+def _hex(texto):
+    limpio = re.sub(rb"[^0-9A-Fa-f]", b"", texto)
+    return bytes.fromhex((limpio + b"0" * (len(limpio) % 2)).decode())
+
+
+def _cadena_pdf(crudo):
+    """Texto de los metadatos: UTF-16 si empieza con su marca, si no, la codificación de PDF (≈ latin-1)."""
+    if crudo.startswith(b"\xfe\xff"):
+        return crudo[2:].decode("utf-16-be", "ignore")
+    if crudo.startswith(b"\xef\xbb\xbf"):
+        return crudo[3:].decode("utf-8", "ignore")
+    return crudo.decode("cp1252", "ignore")
+
+
+def _utf16(hexa):
+    return _hex(hexa).decode("utf-16-be", "ignore")
+
+
+def _cmap(datos):
+    """Tabla ToUnicode: {código (bytes): texto}."""
+    tabla = {}
+    for bloque in re.findall(rb"beginbfchar(.*?)endbfchar", datos, re.S):
+        for codigo, destino in re.findall(rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]*)>", bloque):
+            tabla[_hex(codigo)] = _utf16(destino)
+    for bloque in re.findall(rb"beginbfrange(.*?)endbfrange", datos, re.S):
+        for ini, fin, destino in re.findall(rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]*>|\[[^\]]*\])",
+                                             bloque):
+            a, b, ancho = int(ini, 16), int(fin, 16), len(_hex(ini))
+            if b - a > 0xFFFF or b < a:
+                continue
+            if destino.startswith(b"["):
+                for k, d in enumerate(re.findall(rb"<([0-9A-Fa-f]*)>", destino)):
+                    tabla[(a + k).to_bytes(ancho, "big")] = _utf16(d)
+            else:
+                base = _utf16(destino[1:-1])
+                for k in range(b - a + 1):
+                    tabla[(a + k).to_bytes(ancho, "big")] = base[:-1] + chr(ord(base[-1]) + k) if base else ""
+    return tabla
+
+
+def _fichas(datos):
+    """Fichas de un flujo de contenido: ('dato', valor) u ('op', operador)."""
+    i, n, pilas = 0, len(datos), [[]]
+    while i < n:
+        c = datos[i]
+        if c in b" \t\r\n\f\x00":
+            i += 1
+        elif c == 0x25:  # % comentario
+            fin = datos.find(b"\n", i)
+            i = n if fin < 0 else fin + 1
+        elif c == 0x28:
+            valor, i = _literal(datos, i)
+            yield from _dato(pilas, valor)
+        elif datos.startswith(b"<<", i) or datos.startswith(b">>", i):
+            i += 2
+        elif c == 0x3C:
+            fin = datos.find(b">", i)
+            fin = n if fin < 0 else fin
+            yield from _dato(pilas, _hex(datos[i + 1:fin]))
+            i = fin + 1
+        elif c == 0x5B:
+            pilas.append([])
+            i += 1
+        elif c == 0x5D:
+            lista = pilas.pop() if len(pilas) > 1 else []
+            yield from _dato(pilas, lista)
+            i += 1
+        elif c in b"{}>)":
+            i += 1
+        else:
+            j = i + 1
+            while j < n and datos[j] not in b" \t\r\n\f\x00" and datos[j] not in _DELIM:
+                j += 1
+            ficha = datos[i:j]
+            i = j
+            if ficha.startswith(b"/"):
+                yield from _dato(pilas, ficha[1:].decode("latin-1"))
+            elif re.fullmatch(rb"[+-]?(\d+\.?\d*|\.\d+)", ficha):
+                yield from _dato(pilas, float(ficha))
+            elif ficha == b"BI":  # imagen dentro del texto: se salta hasta EI
+                fin = datos.find(b"EI", i)
+                i = n if fin < 0 else fin + 2
+            elif len(pilas) == 1:
+                yield "op", ficha.decode("latin-1")
+
+
+def _dato(pilas, valor):
+    if len(pilas) > 1:
+        pilas[-1].append(valor)
+    else:
+        yield "dato", valor
 
 
 # ─────────────────────────── clasificación ───────────────────────────
@@ -296,6 +809,18 @@ def clasificar(f, reglas):
 def carpeta_descargas():
     if os.environ.get("ORDENITO_CARPETA"):
         return Path(os.environ["ORDENITO_CARPETA"]).expanduser()
+    if WINDOWS:  # la carpeta Descargas puede estar movida a otro disco: Windows sabe dónde
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion"
+                                r"\Explorer\User Shell Folders") as k:
+                valor = winreg.QueryValueEx(k, "{374DE290-123F-4565-9164-39C4925E467B}")[0]
+            ruta = Path(os.path.expandvars(valor))
+            if ruta.is_dir():
+                return ruta
+        except OSError:
+            pass
+        return HOME / "Downloads"
     try:
         r = subprocess.run(["xdg-user-dir", "DOWNLOAD"], capture_output=True, text=True, timeout=5)
         ruta = Path(r.stdout.strip())
@@ -307,7 +832,9 @@ def carpeta_descargas():
 
 
 def ruta_destino(destino):
-    return Path(destino).expanduser() if destino.startswith(("/", "~")) else HOME / destino
+    if destino.startswith("~"):
+        return Path(destino).expanduser()
+    return Path(destino) if Path(destino).is_absolute() or destino.startswith("/") else HOME / destino
 
 
 def real(ruta):
@@ -317,7 +844,7 @@ def real(ruta):
 
 def bonito(ruta):
     ruta, casa = real(ruta), real(HOME)
-    return "~/" + str(ruta.relative_to(casa)) if ruta.is_relative_to(casa) else str(ruta)
+    return "~/" + ruta.relative_to(casa).as_posix() if ruta.is_relative_to(casa) else str(ruta)
 
 
 def libre(carpeta, nombre):
@@ -331,6 +858,9 @@ def libre(carpeta, nombre):
 
 def terminado(f, intentos=10, pausa=1.5):
     """Espera a que la descarga deje de crecer."""
+    st = f.stat()
+    if st.st_size > 0 and time.time() - st.st_mtime > 5:  # hace rato que no cambia: no hace falta esperar
+        return True
     for _ in range(intentos):
         antes = f.stat().st_size
         time.sleep(pausa)
@@ -341,14 +871,14 @@ def terminado(f, intentos=10, pausa=1.5):
 
 def _json(nombre, defecto):
     try:
-        return json.loads((ESTADO / nombre).read_text())
+        return json.loads((ESTADO / nombre).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return defecto
 
 
 def _guardar_json(nombre, datos):
     ESTADO.mkdir(parents=True, exist_ok=True)
-    (ESTADO / nombre).write_text(json.dumps(datos, ensure_ascii=False, indent=1))
+    (ESTADO / nombre).write_text(json.dumps(datos, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def _historial():
@@ -367,28 +897,92 @@ def _registrar(desde, hacia, puntos=0, **extra):
                            ensure_ascii=False) + "\n")
 
 
-def papelera():
+def _anotar_error(texto):
+    """Errores del servicio en segundo plano (nadie ve su consola)."""
+    try:
+        ESTADO.mkdir(parents=True, exist_ok=True)
+        with (ESTADO / "errores.log").open("a", encoding="utf-8") as e:
+            e.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {texto}\n")
+    except OSError:
+        pass
+
+
+# ───────────────────────────── papelera ─────────────────────────────
+
+_SID = []
+
+
+def _sid():
+    """Identificador de tu usuario en Windows: cada usuario tiene su carpeta en la Papelera."""
+    if not _SID:
+        r = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True,
+                           timeout=10, creationflags=SIN_VENTANA)
+        _SID.append(r.stdout.strip().split(",")[-1].strip('"'))
+    return _SID[0]
+
+
+def papelera(f=None):
+    """La papelera del sistema. En Windows hay una por disco: la del disco donde está el archivo."""
+    if WINDOWS:
+        casa = Path(real(HOME).anchor) / "$Recycle.Bin" / _sid()
+        if f is None:
+            return casa
+        propia = Path(real(f).anchor) / "$Recycle.Bin" / _sid()
+        return propia if propia.is_dir() else casa
     if MAC:
         return HOME / ".Trash"
     return Path(os.environ.get("XDG_DATA_HOME", HOME / ".local" / "share")) / "Trash"
 
 
-def cesto():
+def cesto(f=None):
     """Carpeta donde quedan los archivos tirados (en Linux, Trash/files)."""
-    return papelera() if MAC else papelera() / "files"
+    return papelera(f) if MAC or WINDOWS else papelera() / "files"
 
 
 def a_papelera(f):
-    """Manda a la papelera del sistema: se puede restaurar desde Archivos/Finder o con 'deshacer'."""
+    """Manda a la papelera del sistema: se puede restaurar desde Archivos/Finder/Explorador o con 'deshacer'."""
+    if WINDOWS:
+        return _a_papelera_windows(f)
     cesto().mkdir(parents=True, exist_ok=True)
     destino = libre(cesto(), f.name)
     if not MAC:  # estándar freedesktop: el gestor de archivos sabe de dónde vino
         (papelera() / "info").mkdir(parents=True, exist_ok=True)
         (papelera() / "info" / f"{destino.name}.trashinfo").write_text(
             f"[Trash Info]\nPath={quote(str(f.resolve()))}\n"
-            f"DeletionDate={datetime.now():%Y-%m-%dT%H:%M:%S}\n")
+            f"DeletionDate={datetime.now():%Y-%m-%dT%H:%M:%S}\n", encoding="utf-8")
     shutil.move(str(f), str(destino))
     return destino
+
+
+def _a_papelera_windows(f):
+    """Igual que el Explorador: el archivo pasa a llamarse $R…, y $I… guarda de dónde vino y cuándo.
+    Así aparece en la Papelera de reciclaje con su nombre y se puede 'Restaurar' desde ahí."""
+    import secrets
+    carpeta = cesto(f)
+    carpeta.mkdir(parents=True, exist_ok=True)
+    while True:
+        clave = "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(6)) + f.suffix
+        destino, info = carpeta / f"$R{clave}", carpeta / f"$I{clave}"
+        if not destino.exists() and not info.exists():
+            break
+    origen = str(real(f))
+    momento = int((time.time() + 11_644_473_600) * 10_000_000)   # FILETIME: desde 1601, en 100 ns
+    info.write_bytes(struct.pack("<qqqi", 2, f.stat().st_size, momento, len(origen) + 1)
+                     + (origen + "\0").encode("utf-16-le"))
+    try:
+        shutil.move(str(f), str(destino))
+    except OSError:
+        info.unlink(missing_ok=True)
+        raise
+    return destino
+
+
+def _sacar_de_papelera(actual):
+    """Al restaurar, se borra la ficha que dice de dónde vino (si no, quedaría un fantasma)."""
+    if WINDOWS and actual.name.startswith("$R"):
+        actual.with_name("$I" + actual.name[2:]).unlink(missing_ok=True)
+    elif not MAC and not WINDOWS and actual.is_relative_to(cesto()):
+        (papelera() / "info" / f"{actual.name}.trashinfo").unlink(missing_ok=True)
 
 
 def huella(f):
@@ -404,15 +998,51 @@ def gemelo(f, carpeta):
     if not carpeta.is_dir():
         return None
     tam = f.stat().st_size
-    mismos = [c for c in carpeta.iterdir() if c.is_file() and c != f and c.stat().st_size == tam]
+    mismos = [c for c in carpeta.iterdir() if c.is_file() and c != f and not en_la_nube(c)
+              and c.stat().st_size == tam]
     if not mismos:
         return None
     propia = huella(f)
     return next((c for c in mismos if huella(c) == propia), None)
 
 
+# Notificación de Windows sin instalar nada: PowerShell trae las de WinRT. Los textos van en
+# variables de entorno, nunca dentro del script, y se asignan como texto (no como XML).
+_AVISO_WINDOWS = (
+    "$ErrorActionPreference='Stop';"
+    "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];"
+    "$x=[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]::new();"
+    "$x.LoadXml('<toast><visual><binding template=\"ToastGeneric\"><text/><text/></binding></visual></toast>');"
+    "$t=$x.GetElementsByTagName('text');"
+    "[void]$t.Item(0).AppendChild($x.CreateTextNode($env:ORDENITO_TITULO));"
+    "[void]$t.Item(1).AppendChild($x.CreateTextNode($env:ORDENITO_CUERPO));"
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:ORDENITO_APP)"
+    ".Show([Windows.UI.Notifications.ToastNotification]::new($x))"
+)
+APP_ID = "Gr8coolmind.Ordenito"
+_POWERSHELL_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def _app_id():
+    """El instalador registra 'Ordenito' (nombre e ícono); sin él, el aviso sale a nombre de PowerShell."""
+    try:
+        import winreg
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\AppUserModelId\{APP_ID}").Close()
+        return APP_ID
+    except OSError:
+        return _POWERSHELL_ID
+
+
 def notificar(titulo, cuerpo):
-    if MAC:  # los textos van como argumentos, nunca dentro del script
+    if WINDOWS:
+        entorno = dict(os.environ, ORDENITO_TITULO=titulo, ORDENITO_CUERPO=cuerpo, ORDENITO_APP=_app_id())
+        try:
+            subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", _AVISO_WINDOWS],
+                             env=entorno, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, creationflags=SIN_VENTANA)
+        except OSError:
+            pass
+    elif MAC:  # los textos van como argumentos, nunca dentro del script
         subprocess.run(["osascript", "-e", "on run argv", "-e",
                         'display notification (item 2 of argv) with title "Ordenito" subtitle (item 1 of argv)',
                         "-e", "end run", titulo, cuerpo.replace("\n", " ")], check=False)
@@ -421,13 +1051,26 @@ def notificar(titulo, cuerpo):
                        check=False)
 
 
-def pendientes(dl=None):
-    """Archivos de Descargas que Ordenito tendría que mirar."""
-    dl = dl or carpeta_descargas()
-    ignorados = set(_json("ignorados.json", []))
-    return [f for f in (sorted(dl.iterdir()) if dl.is_dir() else [])
-            if f.is_file() and not f.name.startswith(".") and f.suffix.lower() not in EN_CURSO
-            and f.name not in ignorados]
+# ───────────────────────────── ordenar ─────────────────────────────
+
+def _ignorados():
+    """Archivos devueltos con 'deshacer': no se vuelven a mover. (Antes se guardaba solo el nombre.)"""
+    dl = carpeta_descargas()
+    return {e if ("/" in e or "\\" in e) else str(dl / e) for e in _json("ignorados.json", [])}
+
+
+def pendientes(carpetas=None, ignorados=None):
+    """Archivos de Descargas (y de las carpetas vigiladas) que Ordenito tendría que mirar."""
+    ignorados = _ignorados() if ignorados is None else ignorados
+    salida = []
+    for c in carpetas or carpetas_vigiladas():
+        try:
+            hijos = sorted(c.iterdir()) if c.is_dir() else []
+        except OSError:
+            continue
+        salida += [f for f in hijos if f.is_file() and not oculto(f) and f.suffix.lower() not in EN_CURSO
+                   and str(f) not in ignorados]
+    return salida
 
 
 def vista_previa():
@@ -436,47 +1079,55 @@ def vista_previa():
     for f in pendientes():
         res = clasificar(f, reglas)
         carpeta = ruta_destino(res.destino) if res.destino else None
+        if carpeta and real(carpeta) == real(f.parent):  # ya está donde va
+            res, carpeta = Resultado(None, 0, "ya está en su carpeta", res.tabla), None
         plan.append((f, res, carpeta, gemelo(f, carpeta) if carpeta else None))
     return plan
 
 
-def ordenar(simular=False, esperar=True, avisar=True):
-    reglas, dl = leer_reglas(), carpeta_descargas()
-    ignorados = set(_json("ignorados.json", []))
-    presentes = {f.name for f in dl.iterdir()} if dl.is_dir() else set()
-    if ignorados - presentes:  # los que ya no están en Descargas dejan de ignorarse
-        ignorados &= presentes
-        _guardar_json("ignorados.json", sorted(ignorados))
+def ordenar(simular=False, esperar=True, avisar=True, fallos=None):
+    """Ordena lo que haya en las carpetas vigiladas. -> archivos movidos.
+    Si un archivo no se puede mover (Windows lo tiene abierto), se anota en 'fallos' y se sigue."""
+    reglas = leer_reglas()
+    guardados = _json("ignorados.json", [])
+    ignorados = _ignorados()
+    vigentes = {i for i in ignorados if Path(i).exists()}  # los que ya no están dejan de ignorarse
+    if vigentes != set(guardados):
+        _guardar_json("ignorados.json", sorted(vigentes))
 
     movidos = 0
-    for f in sorted(dl.iterdir()) if dl.is_dir() else []:
-        if (not f.is_file() or f.name.startswith(".") or f.suffix.lower() in EN_CURSO
-                or f.name in ignorados):
-            continue
-        if not simular and esperar and not terminado(f):
-            continue
-        res = clasificar(f, reglas)
-        if not res.destino:
-            continue
-        carpeta = ruta_destino(res.destino)
-        igual = gemelo(f, carpeta)
-        if igual:  # ya lo tenías: no guardar una copia "(2)"
-            if simular:
-                print(f"  {f.name}  →  papelera  {gris(f'(ya lo tienes: {bonito(igual)})')}")
+    for f in pendientes(ignorados=vigentes):
+        try:
+            if not simular and esperar and not terminado(f):
                 continue
-            tirado = a_papelera(f)
-            movidos += 1
-            _registrar(f, tirado, res.puntos, duplicado_de=str(igual))
-            if avisar:
-                notificar("Ya lo tenías", f"{f.name} es idéntico a {bonito(igual)}.\n"
-                                          "La copia nueva fue a la papelera.")
+            res = clasificar(f, reglas)
+            if not res.destino:
+                continue
+            carpeta = ruta_destino(res.destino)
+            if real(carpeta) == real(f.parent):  # la carpeta vigilada es su destino: ya está bien
+                continue
+            igual = gemelo(f, carpeta)
+            if igual:  # ya lo tenías: no guardar una copia "(2)"
+                if simular:
+                    print(f"  {f.name}  →  papelera  {gris(f'(ya lo tienes: {bonito(igual)})')}")
+                    continue
+                tirado = a_papelera(f)
+                movidos += 1
+                _registrar(f, tirado, res.puntos, duplicado_de=str(igual))
+                if avisar:
+                    notificar("Ya lo tenías", f"{f.name} es idéntico a {bonito(igual)}.\n"
+                                              "La copia nueva fue a la papelera.")
+                continue
+            nuevo = libre(carpeta, f.name)
+            if simular:
+                print(f"  {f.name}  →  {bonito(nuevo.parent)}  {gris(f'({res.puntos} pts, {res.motivo})')}")
+                continue
+            nuevo.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(f), str(nuevo))
+        except OSError as error:
+            if fallos is not None:
+                fallos.append((f, error))
             continue
-        nuevo = libre(carpeta, f.name)
-        if simular:
-            print(f"  {f.name}  →  {bonito(nuevo.parent)}  {gris(f'({res.puntos} pts, {res.motivo})')}")
-            continue
-        nuevo.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(f), str(nuevo))
         movidos += 1
         _registrar(f, nuevo, res.puntos)
         if avisar:
@@ -484,22 +1135,76 @@ def ordenar(simular=False, esperar=True, avisar=True):
     return movidos
 
 
+# ───────────────────────── limpieza de Descargas ─────────────────────────
+
+def _llegada(f):
+    """Cuándo llegó el archivo (la fecha más reciente entre creado y modificado)."""
+    st = f.stat()
+    return max(st.st_mtime, getattr(st, "st_birthtime", st.st_ctime))
+
+
+def para_limpiar(dias=None, extensiones=None):
+    """Instaladores, ISOs y torrents de Descargas (y sus subcarpetas) con más de N días."""
+    _, dias_conf, ext_conf = ajustes_limpieza()
+    dias, extensiones = dias or dias_conf, extensiones or ext_conf
+    limite, raiz = time.time() - dias * 86_400, carpeta_descargas()
+    viejos = []
+    for f in (sorted(raiz.rglob("*")) if raiz.is_dir() else []):
+        try:
+            if (f.is_file() and f.suffix.lower() in extensiones and not oculto(f)
+                    and not any(p.name.startswith(".") for p in f.relative_to(raiz).parents)
+                    and _llegada(f) < limite):
+                viejos.append(f)
+        except OSError:
+            continue
+    return viejos
+
+
+def limpiar(simular=False, avisar=True, solo_si_activa=True):
+    """Manda a la papelera los instaladores viejos de Descargas. -> (archivos, bytes)"""
+    activa, dias, _ = ajustes_limpieza()
+    if solo_si_activa and not activa:
+        return 0, 0
+    n, ahorro = 0, 0
+    for f in para_limpiar():
+        tam = f.stat().st_size
+        if simular:
+            print(f"  {bonito(f)}  {gris(f'({tam / 1e6:.1f} MB, más de {dias} días)')}")
+        else:
+            try:
+                _registrar(f, a_papelera(f), limpieza=dias)
+            except OSError:
+                continue
+        n, ahorro = n + 1, ahorro + tam
+    if n and avisar and not simular:
+        notificar("Descargas más livianas", f"{n} instalador(es) de hace más de {dias} días a la papelera "
+                                            f"({ahorro / 1e6:.0f} MB). Se recuperan con Deshacer.")
+    return n, ahorro
+
+
+def limpiar_si_toca():
+    """La limpieza automática corre como mucho una vez por hora (el servicio se dispara a menudo)."""
+    if not ajustes_limpieza()[0] or time.time() - _json("limpieza.json", {}).get("ultima", 0) < 3600:
+        return
+    _guardar_json("limpieza.json", {"ultima": time.time()})
+    limpiar()
+
+
 def deshacer_indices(indices):
     """Devuelve a su lugar los movimientos del historial con esos índices. -> [(ok, mensaje)]"""
     registros, indices = _historial(), set(indices)
-    ignorados, mensajes = set(_json("ignorados.json", [])), []
+    ignorados, mensajes = _ignorados(), []
     for i in sorted(indices, reverse=True):
         r = registros[i]
         actual, origen = Path(r["hacia"]), Path(r["desde"])
         if not actual.exists():
-            mensajes.append((False, f"{actual.name}: ya no está en {bonito(actual.parent)}"))
+            mensajes.append((False, f"{origen.name}: ya no está en {bonito(actual.parent)}"))
             continue
         vuelta = libre(origen.parent, origen.name)
         origen.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(actual), str(vuelta))
-        if not MAC and actual.is_relative_to(cesto()):
-            (papelera() / "info" / f"{actual.name}.trashinfo").unlink(missing_ok=True)
-        ignorados.add(vuelta.name)  # para que el servicio no lo vuelva a mover
+        _sacar_de_papelera(actual)
+        ignorados.add(str(vuelta))  # para que el servicio no lo vuelva a mover
         mensajes.append((True, f"{vuelta.name}  →  {bonito(vuelta.parent)}"))
     _guardar_json("ignorados.json", sorted(ignorados))
     with (ESTADO / "historial.jsonl").open("w", encoding="utf-8") as h:
@@ -516,16 +1221,22 @@ def deshacer(n=1):
         print(f"  {'↩' if ok else '✗'} {mensaje}")
 
 
+def a_donde_fue(r):
+    """Texto de un movimiento del historial: la carpeta, o por qué fue a la papelera."""
+    if r.get("duplicado_de"):
+        return f"papelera (igual a {bonito(r['duplicado_de'])})"
+    if r.get("limpieza"):
+        return f"papelera (limpieza: más de {r['limpieza']} días en Descargas)"
+    return bonito(Path(r["hacia"]).parent)
+
+
 def historial(n=15):
     registros = _historial()[-n:]
     if not registros:
         print("Todavía no se ha movido nada.")
     for r in registros:
         fecha, nombre = gris(r["fecha"].replace("T", " ")), Path(r["desde"]).name
-        if r.get("duplicado_de"):
-            print(f"  {fecha}  {nombre}  →  papelera {gris('(igual a ' + bonito(r['duplicado_de']) + ')')}")
-        else:
-            print(f"  {fecha}  {nombre}  →  {bonito(Path(r['hacia']).parent)}")
+        print(f"  {fecha}  {nombre}  →  {a_donde_fue(r)}")
 
 
 def explicar(f):
@@ -554,7 +1265,7 @@ def fuera_de_lugar(carpeta):
     """[(archivo, carpeta donde debería estar, motivo)] según las reglas. No mueve nada."""
     raiz, reglas, lista = real(carpeta), leer_reglas(), []
     destinos = {real(ruta_destino(r.destino)) for r in reglas if not r.comodin}
-    for f in sorted(p for p in raiz.rglob("*") if p.is_file() and not p.name.startswith(".")):
+    for f in sorted(p for p in raiz.rglob("*") if p.is_file() and not oculto(p)):
         if propia(f.parent, destinos):
             continue
         res = clasificar(f, reglas)
@@ -594,16 +1305,30 @@ def autor(f):
                         if m:
                             return m.group(1).strip()
         if ext == ".pdf" and shutil.which("pdfinfo"):
-            info = subprocess.run(["pdfinfo", "--", str(f)], capture_output=True, text=True, timeout=10)
+            info = subprocess.run(["pdfinfo", "--", str(f)], capture_output=True, text=True, timeout=10,
+                                  creationflags=SIN_VENTANA)
             m = re.search(r"^Author:\s*(.+)$", info.stdout, re.M)
             if m:
                 return m.group(1).strip()
+        elif ext == ".pdf":
+            return Pdf(f).info().get("Author", "")
     except (OSError, zipfile.BadZipFile, subprocess.SubprocessError, ValueError):
         pass
     return ""
 
 
 def _mi_nombre():
+    if WINDOWS:  # el nombre para mostrar de la cuenta (ej. "Ana Pérez"), no el nombre de usuario
+        try:
+            import ctypes
+            tam = ctypes.c_ulong(0)
+            ctypes.windll.secur32.GetUserNameExW(3, None, ctypes.byref(tam))
+            texto = ctypes.create_unicode_buffer(tam.value + 1)
+            if tam.value and ctypes.windll.secur32.GetUserNameExW(3, texto, ctypes.byref(tam)):
+                return normalizar(texto.value).strip()
+        except (OSError, AttributeError):
+            pass
+        return ""
     try:
         import pwd
         return normalizar(pwd.getpwuid(os.getuid()).pw_gecos.split(",")[0]).strip()
@@ -633,7 +1358,7 @@ def candidatas(f):
 def agregar_fuertes(destino, pistas, ruta=None):
     """Agrega pistas a la línea 'fuertes:' del bloque [destino] (o crea el bloque)."""
     ruta = ruta or CONFIG
-    lineas = ruta.read_text(encoding="utf-8").splitlines()
+    lineas = ruta.read_text(encoding="utf-8-sig").splitlines()
     nuevas = ", ".join(p.strip() for p in pistas)
     try:
         i = next(n for n, l in enumerate(lineas) if l.strip() == f"[{destino}]")
@@ -654,9 +1379,9 @@ def agregar_fuertes(destino, pistas, ruta=None):
 
 def destino_de(carpeta):
     """Nombre del bloque de reglas para una carpeta (el existente o uno nuevo relativo a HOME)."""
-    carpeta, casa = real(carpeta), real(HOME)
+    carpeta = real(carpeta)
     return next((r.destino for r in leer_reglas() if not r.comodin and real(ruta_destino(r.destino)) == carpeta),
-                str(carpeta.relative_to(casa)) if carpeta.is_relative_to(casa) else str(carpeta))
+                como_destino(carpeta))
 
 
 def pistas_nuevas(f, destino):
@@ -713,7 +1438,8 @@ def grupos_duplicados(carpeta):
     raiz = Path(carpeta).expanduser()
     por_tam = {}
     for f in raiz.rglob("*"):
-        if f.is_file() and not f.is_symlink() and not f.name.startswith(".") and f.stat().st_size > 0:
+        if (f.is_file() and not f.is_symlink() and not oculto(f) and not en_la_nube(f)
+                and f.stat().st_size > 0):
             por_tam.setdefault(f.stat().st_size, []).append(f)
     grupos = {}
     for mismos in (v for v in por_tam.values() if len(v) > 1):
@@ -776,7 +1502,7 @@ def _limites_bloque(lineas, destino):
 def guardar_bloque(destino, fuertes=(), palabras=(), extensiones=(), anterior=None, ruta=None):
     """Crea o reemplaza un bloque de reglas. Conserva los comentarios del bloque anterior."""
     ruta = ruta or CONFIG
-    lineas = ruta.read_text(encoding="utf-8").splitlines() if ruta.exists() else []
+    lineas = ruta.read_text(encoding="utf-8-sig").splitlines() if ruta.exists() else []
     nuevo = [f"[{destino}]"]
     lim = _limites_bloque(lineas, anterior or destino)
     if lim:
@@ -798,25 +1524,126 @@ def guardar_bloque(destino, fuertes=(), palabras=(), extensiones=(), anterior=No
 def eliminar_bloque(destino, ruta=None):
     """Quita un bloque de reglas (la carpeta y sus archivos no se tocan)."""
     ruta = ruta or CONFIG
-    lineas = ruta.read_text(encoding="utf-8").splitlines()
+    lineas = ruta.read_text(encoding="utf-8-sig").splitlines()
     lim = _limites_bloque(lineas, destino)
     if lim:
         del lineas[lim[0]:lim[1]]
         ruta.write_text("\n".join(lineas) + "\n", encoding="utf-8")
 
 
+def como_destino(carpeta):
+    """Ruta para escribir en las reglas: relativa a tu carpeta personal si está dentro de ella."""
+    carpeta, casa = real(carpeta), real(HOME)
+    return carpeta.relative_to(casa).as_posix() if carpeta.is_relative_to(casa) else str(carpeta)
+
+
+def guardar_vigiladas(carpetas, ruta=None):
+    """Guarda las carpetas extra que se vigilan (además de Descargas) en el bloque [vigilar]."""
+    if carpetas:
+        guardar_bloque(VIGILAR, palabras=[como_destino(c) for c in carpetas], ruta=ruta)
+    elif (ruta or CONFIG).exists():
+        eliminar_bloque(VIGILAR, ruta)
+
+
+def guardar_limpieza(activa, dias, extensiones, ruta=None):
+    guardar_bloque(LIMPIEZA, palabras=[f"dias: {int(dias)}"] + ([] if activa else ["apagada"]),
+                   extensiones=[e.lstrip(".") for e in extensiones], ruta=ruta)
+
+
+def carpeta_escritorio():
+    """El Escritorio de verdad (en Windows puede estar dentro de OneDrive)."""
+    if WINDOWS:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion"
+                                r"\Explorer\User Shell Folders") as k:
+                ruta = Path(os.path.expandvars(winreg.QueryValueEx(k, "Desktop")[0]))
+            if ruta.is_dir():
+                return ruta
+        except OSError:
+            pass
+    elif not MAC:
+        try:
+            r = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, timeout=5)
+            ruta = Path(r.stdout.strip())
+            if r.returncode == 0 and ruta.is_dir() and ruta != HOME:
+                return ruta
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return HOME / "Desktop"
+
+
 # ───────────────────────── servicio y sistema ─────────────────────────
 
 ETIQUETA_MAC = "com.gr8coolmind.ordenito"
+CLAVE_INICIO = r"Software\Microsoft\Windows\CurrentVersion\Run"   # programas que arrancan al iniciar sesión
 
 
 def _plist():
     return HOME / "Library" / "LaunchAgents" / f"{ETIQUETA_MAC}.plist"
 
 
+def _proceso_vivo(pid):
+    """¿Sigue corriendo ese proceso y es Python? (Windows reutiliza los números de proceso)"""
+    if not WINDOWS:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    try:
+        codigo = wintypes.DWORD()
+        if not k32.GetExitCodeProcess(h, ctypes.byref(codigo)) or codigo.value != 259:   # STILL_ACTIVE
+            return False
+        ruta, tam = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
+        if k32.QueryFullProcessImageNameW(h, 0, ruta, ctypes.byref(tam)):
+            return "python" in Path(ruta.value).name.lower()
+        return True
+    finally:
+        k32.CloseHandle(h)
+
+
+def _vigilante():
+    """Número de proceso del vigilante de Windows si está corriendo, o None."""
+    try:
+        pid = int((ESTADO / "vigilante.pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return pid if _proceso_vivo(pid) else None
+
+
+def _orden_vigilante():
+    """Cómo se arranca el vigilante: pythonw (sin ventana de consola) con este mismo archivo."""
+    python = Path(sys.executable)
+    sin_consola = python.with_name("pythonw.exe")
+    return [str(sin_consola if sin_consola.exists() else python), "-I", str(Path(__file__).resolve()), "vigilar"]
+
+
+def _inicio_de_sesion(orden=None):
+    """Pone (o quita, con None) a Ordenito entre los programas que arrancan al iniciar sesión."""
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, CLAVE_INICIO, 0, winreg.KEY_SET_VALUE) as k:
+        if orden:
+            winreg.SetValueEx(k, "Ordenito", 0, winreg.REG_SZ, subprocess.list2cmdline(orden))
+        else:
+            try:
+                winreg.DeleteValue(k, "Ordenito")
+            except FileNotFoundError:
+                pass
+
+
 def servicio_activo():
     """¿Está vigilando Descargas el servicio automático?"""
     try:
+        if WINDOWS:
+            return _vigilante() is not None
         if MAC:
             return subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{ETIQUETA_MAC}"],
                                   capture_output=True, timeout=10).returncode == 0
@@ -826,10 +1653,39 @@ def servicio_activo():
         return False
 
 
+def _esperar(condicion, segundos=8):
+    limite = time.time() + segundos
+    while time.time() < limite:
+        if condicion():
+            return True
+        time.sleep(0.2)
+    return condicion()
+
+
 def cambiar_servicio(encender):
     """Enciende o apaga el servicio. Devuelve True si quedó como se pidió."""
     try:
-        if MAC:
+        if WINDOWS:
+            if encender:
+                orden = _orden_vigilante()
+                _inicio_de_sesion(orden)
+                if not _vigilante():
+                    subprocess.Popen(orden, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, close_fds=True,
+                                     creationflags=subprocess.DETACHED_PROCESS
+                                     | subprocess.CREATE_NEW_PROCESS_GROUP | SIN_VENTANA)
+                _esperar(lambda: _vigilante() is not None)
+            else:
+                _inicio_de_sesion(None)
+                pid = _vigilante()
+                if pid:  # se le pide que termine; si no responde, se cierra
+                    ESTADO.mkdir(parents=True, exist_ok=True)
+                    (ESTADO / "vigilante.parar").write_text("1", encoding="utf-8")
+                    if not _esperar(lambda: _vigilante() is None, 6):
+                        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
+                                       timeout=10, creationflags=SIN_VENTANA)
+                        _esperar(lambda: _vigilante() is None, 3)
+        elif MAC:
             accion = "bootstrap" if encender else "bootout"
             subprocess.run(["launchctl", accion, f"gui/{os.getuid()}", str(_plist())],
                            capture_output=True, timeout=15)
@@ -841,19 +1697,107 @@ def cambiar_servicio(encender):
     return servicio_activo() == encender
 
 
+def _foto(carpetas):
+    """Lo que hay en las carpetas (nombre, tamaño y fecha): si cambia, llegó o terminó algo."""
+    foto = []
+    for c in carpetas:
+        try:
+            with os.scandir(c) as entradas:
+                for e in entradas:
+                    try:
+                        st = e.stat()
+                        foto.append((e.path, st.st_size, st.st_mtime_ns))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return sorted(foto)
+
+
+def _segundo_plano():
+    """Prioridad baja de CPU y de disco, como Nice=10 e IOSchedulingClass=idle en Linux."""
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        if not k32.SetPriorityClass(k32.GetCurrentProcess(), 0x00100000):   # PROCESS_MODE_BACKGROUND_BEGIN
+            k32.SetPriorityClass(k32.GetCurrentProcess(), 0x00004000)       # BELOW_NORMAL_PRIORITY_CLASS
+    except (OSError, AttributeError):
+        pass
+
+
+def vigilar(pausa=2.0, vueltas=None):
+    """El servicio de Windows: se queda mirando Descargas (y las carpetas vigiladas) y ordena lo
+    que llega. Lo arranca el inicio de sesión; 'ordenito servicio apagar' lo detiene."""
+    otro = _vigilante()
+    if otro and otro != os.getpid():
+        return  # ya hay uno vigilando
+    ESTADO.mkdir(parents=True, exist_ok=True)
+    marca, parar = ESTADO / "vigilante.pid", ESTADO / "vigilante.parar"
+    parar.unlink(missing_ok=True)
+    marca.write_text(str(os.getpid()), encoding="utf-8")
+    _segundo_plano()
+    antes, reintento, n = None, 0.0, 0
+    try:
+        while not parar.exists() and (vueltas is None or n < vueltas):
+            n += 1
+            try:
+                if CONFIG.exists():
+                    carpetas = carpetas_vigiladas()
+                    foto = _foto(carpetas)
+                    if foto != antes or (reintento and time.time() > reintento):
+                        fallos = []
+                        ordenar(fallos=fallos)
+                        # Un archivo que el navegador todavía tiene abierto se reintenta en 10 s
+                        reintento = time.time() + 10 if fallos else 0.0
+                        antes = _foto(carpetas)
+                    limpiar_si_toca()
+            except (Exception, SystemExit) as error:  # ni por un archivo raro ni por reglas mal escritas
+                _anotar_error(f"{type(error).__name__}: {error}")
+            time.sleep(pausa)
+    finally:
+        parar.unlink(missing_ok=True)
+        try:
+            if marca.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                marca.unlink()
+        except OSError:
+            pass
+
+
 def abrir(ruta):
     """Abre una carpeta o archivo con la aplicación del sistema."""
+    if WINDOWS:
+        os.startfile(str(ruta))
+        return
     subprocess.Popen(["open" if MAC else "xdg-open", str(ruta)],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # ───────────────────────────── consola ─────────────────────────────
 
+def _preparar_consola():
+    """En Windows: que se vean las tildes, ✓ y los colores (la consola no usa UTF-8 por defecto)."""
+    if not WINDOWS:
+        return
+    for flujo in (sys.stdout, sys.stderr):
+        if flujo is not None and hasattr(flujo, "reconfigure"):
+            flujo.reconfigure(encoding="utf-8", errors="replace")
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h, modo = k32.GetStdHandle(-11), ctypes.c_ulong()
+        if k32.GetConsoleMode(h, ctypes.byref(modo)):
+            k32.SetConsoleMode(h, modo.value | 0x0004)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except (OSError, AttributeError):
+        pass
+
+
 def _color(codigo):
-    usar = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    # Con pythonw (el servicio de Windows) no hay consola: sys.stdout es None
+    usar = sys.stdout is not None and sys.stdout.isatty() and not os.environ.get("NO_COLOR")
     return lambda t: f"\033[{codigo}m{t}\033[0m" if usar else t
 
 
+_preparar_consola()
 negrita, gris = _color("1"), _color("2")
 
 
@@ -883,13 +1827,32 @@ def main(argv=None):
     s = sub.add_parser("duplicados", help="busca archivos idénticos repetidos")
     s.add_argument("carpeta", nargs="?", default="~/Documents")
     s.add_argument("--papelera", action="store_true", help="manda las copias sobrantes a la papelera")
+    s = sub.add_parser("limpiar", help="manda a la papelera los instaladores viejos de Descargas")
+    s.add_argument("--simular", action="store_true", help="solo muestra qué se limpiaría")
+    s.add_argument("--dias", type=int, help=f"antigüedad mínima (por defecto, la de [limpieza] o {LIMPIEZA_DIAS})")
+    sub.add_parser("vigilar", help="se queda vigilando y ordena lo que llega (el servicio de Windows)")
     a = p.parse_args(argv)
 
     if a.comando in (None, "ordenar"):
         ordenar()
+        limpiar_si_toca()
     elif a.comando == "simular":
-        print(negrita(f"Simulación sobre {bonito(carpeta_descargas())}:"))
+        print(negrita("Simulación sobre " + ", ".join(bonito(c) for c in carpetas_vigiladas()) + ":"))
         ordenar(simular=True)
+    elif a.comando == "limpiar":
+        dias = a.dias or ajustes_limpieza()[1]
+        viejos = para_limpiar(dias)
+        if not viejos:
+            print(f"No hay instaladores de hace más de {dias} días en {bonito(carpeta_descargas())}.")
+        for f in viejos:
+            tam = f.stat().st_size / 1e6
+            print(f"  {'·' if a.simular else '🗑'} {bonito(f)}  {gris(f'({tam:.1f} MB)')}")
+            if not a.simular:
+                _registrar(f, a_papelera(f), limpieza=dias)
+        if viejos and not a.simular:
+            print(f"\n{len(viejos)} archivo(s) a la papelera. Se recuperan con 'ordenito deshacer {len(viejos)}'.")
+    elif a.comando == "vigilar":
+        vigilar()
     elif a.comando == "explicar":
         explicar(a.archivo)
     elif a.comando == "revisar":
@@ -904,8 +1867,8 @@ def main(argv=None):
         duplicados(a.carpeta, a.papelera)
     elif a.comando == "servicio":
         if a.accion != "estado" and not cambiar_servicio(a.accion == "encender"):
-            sys.exit("No pude cambiar el servicio. ¿Ejecutaste ./instalar.sh?")
-        print("Servicio " + ("encendido: vigilando " + bonito(carpeta_descargas())
+            sys.exit("No pude cambiar el servicio. ¿Ejecutaste " + ("instalar.cmd" if WINDOWS else "./instalar.sh") + "?")
+        print("Servicio " + ("encendido: vigilando " + ", ".join(bonito(c) for c in carpetas_vigiladas())
                              if servicio_activo() else "apagado"))
 
 

@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import queue
 import re
+import subprocess
 import sys
 import threading
 from datetime import datetime
@@ -19,7 +20,8 @@ try:
     from tkinter import filedialog, font, messagebox, ttk
 except ImportError:
     sys.exit("La app necesita Tkinter. Instálalo con: python3-tk (Ubuntu/Debian), "
-             "python3-tkinter (Fedora) o 'brew install python-tk' (Mac/Homebrew).")
+             "python3-tkinter (Fedora), 'brew install python-tk' (Mac/Homebrew) o, en Windows, "
+             "reinstalando Python desde python.org con la opción 'tcl/tk and IDLE' marcada.")
 
 
 def _cargar_motor():
@@ -38,9 +40,87 @@ def _cargar_motor():
 
 o = _cargar_motor()
 
-ACENTO = "#2563eb"
-FONDO = "#f6f7fb"
-TEXTO_SUAVE = "#5b6474"
+
+def preparar_windows():
+    """Antes de abrir la ventana: letras nítidas en pantallas con escala (125 %, 150 %…) y el ícono
+    de Ordenito en la barra de tareas (si no, Windows la agrupa con el de Python)."""
+    if not o.WINDOWS:
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (OSError, AttributeError):
+        pass
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(o.APP_ID)
+    except (OSError, AttributeError):
+        pass
+
+
+# ───────────────────────────── colores ─────────────────────────────
+
+CLARO = dict(fondo="#f6f7fb", superficie="#ffffff", texto="#111827", suave="#5b6474", borde="#d1d5db",
+             acento="#2563eb", acento_activo="#1d4ed8", acento_apagado="#93c5fd", texto_acento="#ffffff",
+             par="#f9fafb", apagado="#9ca3af", seleccion="#dbeafe", control="#e5e7eb", control_activo="#d1d5db")
+OSCURO = dict(fondo="#15171c", superficie="#1e2128", texto="#e6e8ec", suave="#9aa3b2", borde="#3a3f4b",
+              acento="#3b82f6", acento_activo="#60a5fa", acento_apagado="#1e3a8a", texto_acento="#ffffff",
+              par="#22262e", apagado="#6b7280", seleccion="#1d3a63", control="#2a2e37", control_activo="#353a45")
+C = dict(CLARO)   # la paleta en uso: se cambia en su lugar para que todo la vea
+
+
+def sistema_oscuro():
+    """¿El sistema está en modo oscuro? (Windows, macOS o GNOME/KDE)"""
+    try:
+        if o.WINDOWS:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+                return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+        if o.MAC:
+            r = subprocess.run(["defaults", "read", "-g", "AppleInterfaceStyle"], capture_output=True,
+                               text=True, timeout=3)
+            return "dark" in r.stdout.lower()
+        r = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+                           capture_output=True, text=True, timeout=3)
+        return "dark" in r.stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def preferencias():
+    return o._json("app.json", {})
+
+
+def guardar_preferencia(clave, valor):
+    datos = preferencias()
+    datos[clave] = valor
+    o._guardar_json("app.json", datos)
+
+
+def tema_elegido():
+    """'claro' u 'oscuro' según lo que eligió la persona (o el sistema, si eligió 'sistema')."""
+    tema = preferencias().get("tema", "sistema")
+    if tema == "sistema":
+        return "oscuro" if sistema_oscuro() else "claro"
+    return tema
+
+
+def barra_de_titulo(ventana, oscura):
+    """En Windows 10/11 la barra de título es del sistema: se le pide que siga el tema."""
+    if not o.WINDOWS:
+        return
+    try:
+        import ctypes
+        ventana.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(ventana.winfo_id()) or ventana.winfo_id()
+        valor = ctypes.c_int(1 if oscura else 0)
+        for atributo in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (y su número viejo)
+            if not ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, atributo, ctypes.byref(valor),
+                                                              ctypes.sizeof(valor)):
+                break
+    except (OSError, AttributeError, tk.TclError):
+        pass
+
 
 # ─────────────────────── carpetas recomendadas ───────────────────────
 # (título, descripción, [(destino, fuertes, palabras, extensiones)])
@@ -86,7 +166,7 @@ CATEGORIAS = [
         ("Documents/Diseno/Fuentes", [], [], ["ttf", "otf", "woff", "woff2"]),
         ("Documents/3D", [], [], ["stl", "obj", "blend", "3mf", "fbx", "gcode"])]),
     ("Instaladores", "Programas, imágenes ISO y torrents (se quedan dentro de Descargas)", [
-        ("Downloads/Instaladores", [], [], ["appimage", "rpm", "deb", "flatpakref", "exe", "msi", "apk",
+        ("Downloads/Instaladores", [], [], ["appimage", "rpm", "deb", "flatpakref", "exe", "msi", "msix", "apk",
                                             "dmg", "pkg"]),
         ("Downloads/ISOs", [], [], ["iso", "img"]),
         ("Downloads/Torrents", [], [], ["torrent"])]),
@@ -124,7 +204,7 @@ class Dialogo(tk.Toplevel):
     def __init__(self, padre, titulo, desplazable=False):
         super().__init__(padre)
         self.title(titulo)
-        self.configure(bg=FONDO)
+        self.configure(bg=C["fondo"])
         self.transient(padre)
         self.resultado = None
         self.desplazable = desplazable
@@ -137,7 +217,7 @@ class Dialogo(tk.Toplevel):
         self.botones = ttk.Frame(self, padding=(18, 10, 18, 14))
         self.botones.pack(side="bottom", fill="x")
         ttk.Separator(self).pack(side="bottom", fill="x")
-        self.lienzo = tk.Canvas(self, bg=FONDO, highlightthickness=0)
+        self.lienzo = tk.Canvas(self, bg=C["fondo"], highlightthickness=0)
         barra = ttk.Scrollbar(self, orient="vertical", command=self.lienzo.yview)
         self.lienzo.configure(yscrollcommand=barra.set)
         barra.pack(side="right", fill="y")
@@ -168,6 +248,7 @@ class Dialogo(tk.Toplevel):
         if self.desplazable:  # que quepa entera en la pantalla
             y = min(max(y, 0), max(self.winfo_screenheight() - self.winfo_height() - 40, 0))
         self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        barra_de_titulo(self, C == OSCURO)
         self.grab_set()
         self.wait_window()
         return self.resultado
@@ -252,8 +333,11 @@ class EditorRegla(Dialogo):
                   style="Suave.TLabel").grid(row=3, column=1, sticky="w")
 
         ttk.Label(campos, text="Palabras del tema").grid(row=4, column=0, sticky="nw", pady=(12, 4))
-        self.palabras = tk.Text(campos, height=4, width=50, wrap="word", relief="solid", borderwidth=1,
-                                font="TkDefaultFont")
+        self.palabras = tk.Text(campos, height=4, width=50, wrap="word", relief="flat", borderwidth=0,
+                                font="TkDefaultFont", bg=C["superficie"], fg=C["texto"],
+                                insertbackground=C["texto"], selectbackground=C["seleccion"],
+                                selectforeground=C["texto"], highlightthickness=1,
+                                highlightbackground=C["borde"], highlightcolor=C["acento"], padx=6, pady=4)
         self.palabras.grid(row=4, column=1, sticky="ew", pady=(12, 4))
         ttk.Label(campos, text="Separadas por coma. Cada aparición en el contenido suma 1 punto.",
                   style="Suave.TLabel").grid(row=5, column=1, sticky="w")
@@ -353,6 +437,23 @@ class Asistente(Dialogo):
         ttk.Label(otros, text="Sale en todos tus trabajos, así que Ordenito nunca lo usará como pista.",
                   style="Suave.TLabel").grid(row=2, column=1, sticky="w", padx=(10, 0))
 
+        ttk.Separator(self.cuerpo).pack(fill="x", pady=14)
+        ya_vigila = o.CONFIG.exists() and any(o.real(c) == o.real(o.carpeta_escritorio())
+                                               for c in o.carpetas_vigiladas())
+        self.escritorio = tk.BooleanVar(value=ya_vigila)
+        ttk.Checkbutton(self.cuerpo, text="Ordenar también el Escritorio", variable=self.escritorio,
+                        style="Negrita.TCheckbutton").pack(anchor="w")
+        ttk.Label(self.cuerpo, style="Suave.TLabel", wraplength=760, justify="left",
+                  text="Lo que guardes en el Escritorio se ordenará igual que tus descargas. "
+                       "Los accesos directos no se tocan.").pack(anchor="w", padx=(24, 0), pady=(0, 6))
+        activa, dias, _ = o.ajustes_limpieza() if o.CONFIG.exists() else (False, o.LIMPIEZA_DIAS, None)
+        self.limpieza = tk.BooleanVar(value=activa)
+        ttk.Checkbutton(self.cuerpo, text=f"Limpiar instaladores viejos de Descargas ({dias} días)",
+                        variable=self.limpieza, style="Negrita.TCheckbutton").pack(anchor="w")
+        ttk.Label(self.cuerpo, style="Suave.TLabel", wraplength=760, justify="left",
+                  text="Los .exe, .msi, ISOs y torrents que ya usaste van a la papelera (se pueden "
+                       "recuperar). Los días se cambian en Ajustes.").pack(anchor="w", padx=(24, 0))
+
         ttk.Button(self.botones, text="Crear mis carpetas", style="Acento.TButton",
                    command=self.crear).pack(side="right")
         if not primera_vez:
@@ -404,7 +505,54 @@ class Asistente(Dialogo):
             if not destino.startswith("*/"):
                 o.ruta_destino(destino).mkdir(parents=True, exist_ok=True)
             creadas += 1
+        extra = o.carpetas_vigiladas()[1:]
+        escritorio = o.carpeta_escritorio()
+        tiene = any(o.real(c) == o.real(escritorio) for c in extra)
+        if self.escritorio.get() != tiene:
+            o.guardar_vigiladas(extra + [escritorio] if self.escritorio.get()
+                                else [c for c in extra if o.real(c) != o.real(escritorio)])
+        activa, dias, extensiones = o.ajustes_limpieza()
+        if self.limpieza.get() != activa:
+            o.guardar_limpieza(self.limpieza.get(), dias, sorted(extensiones))
         self.resultado = creadas
+        self.destroy()
+
+
+class Limpieza(Dialogo):
+    """Lo que la limpieza mandaría a la papelera ahora mismo, con un botón para hacerlo."""
+
+    def __init__(self, padre):
+        super().__init__(padre, "Limpieza de Descargas")
+        _, dias, _ = o.ajustes_limpieza()
+        self.viejos = o.para_limpiar()
+        total = sum(f.stat().st_size for f in self.viejos) / 1e6
+        ttk.Label(self.cuerpo, text=f"Instaladores con más de {dias} días", style="Titulo.TLabel").pack(anchor="w")
+        ttk.Label(self.cuerpo, style="Suave.TLabel",
+                  text=f"{len(self.viejos)} archivo(s), {total:.0f} MB. Van a la papelera: se pueden recuperar."
+                  if self.viejos else "No hay nada que limpiar.").pack(anchor="w", pady=(2, 10))
+        arbol = ttk.Treeview(self.cuerpo, columns=("archivo", "carpeta", "tam"), show="headings", height=10)
+        for col, texto, ancho in (("archivo", "Archivo", 300), ("carpeta", "Carpeta", 260), ("tam", "Tamaño", 80)):
+            arbol.heading(col, text=texto)
+            arbol.column(col, width=ancho, anchor="e" if col == "tam" else "w")
+        for f in self.viejos:
+            arbol.insert("", "end", values=(f.name, o.bonito(f.parent), f"{f.stat().st_size / 1e6:.1f} MB"))
+        arbol.pack(fill="both", expand=True)
+        botones = ttk.Frame(self.cuerpo)
+        botones.pack(fill="x", pady=(14, 0))
+        if self.viejos:
+            ttk.Button(botones, text="Mandar a la papelera", style="Acento.TButton",
+                       command=self.limpiar).pack(side="right")
+        ttk.Button(botones, text="Cerrar", command=self.destroy).pack(side="right", padx=8)
+
+    def limpiar(self):
+        _, dias, _ = o.ajustes_limpieza()
+        for f in self.viejos:
+            if f.exists():
+                try:
+                    o._registrar(f, o.a_papelera(f), limpieza=dias)
+                except OSError:
+                    continue
+        self.resultado = True
         self.destroy()
 
 
@@ -412,13 +560,17 @@ class Asistente(Dialogo):
 
 class App(tk.Tk):
     def __init__(self):
+        preparar_windows()
         super().__init__(className="Ordenito")  # enlaza la ventana con su ícono del menú
         self.title("Ordenito")
-        ancho = min(1040, self.winfo_screenwidth() - 60)
-        alto = min(660, self.winfo_screenheight() - 120)
+        if o.WINDOWS:  # Segoe UI a 9 puntos se lee chico en una ventana con tablas
+            for nombre in ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont"):
+                font.nametofont(nombre).configure(size=10)
+        ancho = min(1080, self.winfo_screenwidth() - 60)
+        alto = min(680, self.winfo_screenheight() - 120)
         self.geometry(f"{ancho}x{alto}")
         self.minsize(min(860, ancho), min(520, alto))
-        self.configure(bg=FONDO)
+        self.arboles = []          # se vuelven a pintar al cambiar de tema
         self._estilos()
         self._icono()
         self.cola = queue.Queue()
@@ -426,6 +578,7 @@ class App(tk.Tk):
         self.plan = {}
         self.registros = []
         self.marca_historial = None
+        self.vueltas = 0
 
         self._cabecera()
         self.pestanas = ttk.Notebook(self)
@@ -435,6 +588,7 @@ class App(tk.Tk):
         self._pestana_carpetas()
         self._pestana_revisar()
         self._pestana_duplicados()
+        self._pestana_ajustes()
         self.estado = ttk.Label(self, text="", style="Estado.TLabel", anchor="w")
         self.estado.pack(fill="x", padx=18, pady=(0, 10))
 
@@ -450,35 +604,91 @@ class App(tk.Tk):
 
     # ── apariencia ──
     def _estilos(self):
+        C.clear()
+        C.update(OSCURO if tema_elegido() == "oscuro" else CLARO)
         s = ttk.Style(self)
         if not o.MAC and "clam" in s.theme_names():
             s.theme_use("clam")
         familia = font.nametofont("TkDefaultFont").actual("family")
-        base = (familia,)
-        s.configure(".", background=FONDO)
-        s.configure("TFrame", background=FONDO)
-        s.configure("Tarjeta.TFrame", background="white", relief="solid", borderwidth=1)
-        s.configure("TLabel", background=FONDO)
-        s.configure("TCheckbutton", background=FONDO)
-        s.configure("Negrita.TCheckbutton", background=FONDO)
+        alto_fila = int(font.nametofont("TkDefaultFont").metrics("linespace") * 1.9)
+        self.configure(bg=C["fondo"])
+        # Para los widgets clásicos de Tk (cuadros de texto y listas de los menús desplegables)
+        for clave, valor in (("background", C["superficie"]), ("foreground", C["texto"]),
+                             ("selectBackground", C["seleccion"]), ("selectForeground", C["texto"]),
+                             ("insertBackground", C["texto"])):
+            self.option_add(f"*Text.{clave}", valor)
+            self.option_add(f"*TCombobox*Listbox.{clave}", valor)
+
+        s.configure(".", background=C["fondo"], foreground=C["texto"], fieldbackground=C["superficie"],
+                    bordercolor=C["borde"], lightcolor=C["control"], darkcolor=C["control"],
+                    troughcolor=C["fondo"], selectbackground=C["seleccion"], selectforeground=C["texto"],
+                    insertcolor=C["texto"], arrowcolor=C["suave"], focuscolor=C["acento"])
+        s.map(".", foreground=[("disabled", C["apagado"])])
+        s.configure("TFrame", background=C["fondo"])
+        s.configure("Tarjeta.TFrame", background=C["superficie"], relief="solid", borderwidth=1)
+        s.configure("TLabel", background=C["fondo"], foreground=C["texto"])
+        for tipo in ("TCheckbutton", "Negrita.TCheckbutton", "TRadiobutton"):
+            s.configure(tipo, background=C["fondo"], foreground=C["texto"],
+                        indicatorbackground=C["superficie"], indicatorforeground=C["texto_acento"],
+                        indicatorrelief="flat", upperbordercolor=C["borde"], lowerbordercolor=C["borde"])
+            s.map(tipo, background=[("active", C["fondo"])],
+                  indicatorbackground=[("selected", C["acento"]), ("pressed", C["control_activo"])])
         if not o.MAC:
             s.configure("Negrita.TCheckbutton", font=(familia, 10, "bold"))
-        s.configure("Grande.TLabel", font=(base[0], 18, "bold"))
-        s.configure("Titulo.TLabel", font=(base[0], 13, "bold"))
-        s.configure("Destino.TLabel", font=(base[0], 12, "bold"), foreground=ACENTO)
-        s.configure("Suave.TLabel", foreground=TEXTO_SUAVE)
-        s.configure("Estado.TLabel", foreground=TEXTO_SUAVE)
-        s.configure("Logo.TLabel", font=(base[0], 22, "bold"), foreground="#111827")
+        s.configure("Grande.TLabel", font=(familia, 18, "bold"))
+        s.configure("Titulo.TLabel", font=(familia, 13, "bold"))
+        s.configure("Destino.TLabel", font=(familia, 12, "bold"), foreground=C["acento"])
+        s.configure("Suave.TLabel", foreground=C["suave"])
+        s.configure("Estado.TLabel", foreground=C["suave"])
+        s.configure("Logo.TLabel", font=(familia, 22, "bold"), foreground=C["texto"])
+        s.configure("TButton", padding=(10, 5), background=C["control"], foreground=C["texto"],
+                    bordercolor=C["borde"], lightcolor=C["control"], darkcolor=C["control"])
+        s.map("TButton", background=[("pressed", C["control_activo"]), ("active", C["control_activo"])])
         if o.MAC:  # en macOS los botones son nativos: no se puede cambiar su color de fondo
             s.configure("Acento.TButton", font=(familia, 13, "bold"))
         else:
-            s.configure("Acento.TButton", foreground="white", background=ACENTO, padding=(14, 6))
-            s.map("Acento.TButton", background=[("active", "#1d4ed8"), ("disabled", "#93c5fd")])
-        s.configure("TButton", padding=(10, 5))
-        s.configure("Treeview", rowheight=26, fieldbackground="white", background="white")
-        s.configure("Treeview.Heading", font=(base[0], 10, "bold"))
-        s.configure("TNotebook", background=FONDO, borderwidth=0)
-        s.configure("TNotebook.Tab", padding=(16, 7))
+            s.configure("Acento.TButton", foreground=C["texto_acento"], background=C["acento"], padding=(14, 6),
+                        bordercolor=C["acento"], lightcolor=C["acento"], darkcolor=C["acento"])
+            s.map("Acento.TButton", background=[("disabled", C["acento_apagado"]), ("pressed", C["acento_activo"]),
+                                                ("active", C["acento_activo"])],
+                  foreground=[("disabled", C["texto_acento"])])
+        for tipo in ("TEntry", "TSpinbox"):
+            s.configure(tipo, fieldbackground=C["superficie"], foreground=C["texto"], insertcolor=C["texto"],
+                        bordercolor=C["borde"], lightcolor=C["superficie"], darkcolor=C["superficie"],
+                        background=C["control"], arrowcolor=C["suave"], padding=4)
+            s.map(tipo, bordercolor=[("focus", C["acento"])], lightcolor=[("focus", C["acento"])])
+        s.configure("Treeview", rowheight=alto_fila, fieldbackground=C["superficie"], background=C["superficie"],
+                    foreground=C["texto"], bordercolor=C["borde"], lightcolor=C["superficie"],
+                    darkcolor=C["superficie"])
+        s.map("Treeview", background=[("selected", C["seleccion"])], foreground=[("selected", C["texto"])])
+        s.configure("Treeview.Heading", font=(familia, 10, "bold"), background=C["control"],
+                    foreground=C["texto"], bordercolor=C["borde"], lightcolor=C["control"],
+                    darkcolor=C["control"], relief="flat", padding=(6, 4))
+        s.map("Treeview.Heading", background=[("active", C["control_activo"])])
+        s.configure("TNotebook", background=C["fondo"], borderwidth=0, bordercolor=C["borde"],
+                    lightcolor=C["fondo"], darkcolor=C["fondo"])
+        s.configure("TNotebook.Tab", padding=(16, 7), background=C["fondo"], foreground=C["suave"],
+                    bordercolor=C["borde"], lightcolor=C["fondo"])
+        s.map("TNotebook.Tab", background=[("selected", C["superficie"])], foreground=[("selected", C["texto"])],
+              lightcolor=[("selected", C["superficie"])])
+        s.configure("TScrollbar", background=C["control"], troughcolor=C["fondo"], bordercolor=C["fondo"],
+                    lightcolor=C["control"], darkcolor=C["control"], arrowcolor=C["suave"])
+        s.map("TScrollbar", background=[("active", C["control_activo"])])
+        s.configure("TSeparator", background=C["borde"])
+        for arbol in self.arboles:
+            self._colores_arbol(arbol)
+        barra_de_titulo(self, C == OSCURO)
+
+    @staticmethod
+    def _colores_arbol(arbol):
+        arbol.tag_configure("par", background=C["par"])
+        arbol.tag_configure("apagado", foreground=C["apagado"])
+
+    def cambiar_tema(self):
+        guardar_preferencia("tema", self.tema.get())
+        self._estilos()
+        self.avisar({"sistema": "La app sigue el tema del sistema.", "claro": "Tema claro.",
+                     "oscuro": "Tema oscuro."}[self.tema.get()])
 
     def _icono(self):
         icono = Path(__file__).resolve().parent / "ordenito.png"
@@ -516,8 +726,8 @@ class App(tk.Tk):
         arbol.configure(yscrollcommand=barra.set)
         arbol.pack(side="left", fill="both", expand=True)
         barra.pack(side="right", fill="y")
-        arbol.tag_configure("par", background="#f9fafb")
-        arbol.tag_configure("apagado", foreground="#9ca3af")
+        self._colores_arbol(arbol)
+        self.arboles.append(arbol)
         return arbol
 
     def _botonera(self, padre, botones):
@@ -592,6 +802,57 @@ class App(tk.Tk):
             ("Mandar copias a la papelera", self.quitar_duplicados)])
         self.grupos = []
 
+    def _pestana_ajustes(self):
+        p = ttk.Frame(self.pestanas, padding=14)
+        self.pestanas.add(p, text="Ajustes")
+        p.columnconfigure(0, weight=3, uniform="col")
+        p.columnconfigure(1, weight=2, uniform="col")
+        p.rowconfigure(0, weight=1)
+
+        izq = ttk.Frame(p)
+        izq.grid(row=0, column=0, sticky="nsew", padx=(0, 28))
+        ttk.Label(izq, text="Carpetas que se ordenan solas", style="Titulo.TLabel").pack(anchor="w")
+        texto = ("Descargas siempre. Agrega otras, como el Escritorio, y lo que guardes ahí también irá a su "
+                 "lugar. Los accesos directos y los archivos ocultos nunca se tocan.")
+        if not o.WINDOWS:
+            texto += (" En Linux y Mac, las carpetas extra se revisan cuando llega algo a Descargas o al pulsar "
+                      "Ordenar ahora.")
+        ttk.Label(izq, text=texto, style="Suave.TLabel", wraplength=500, justify="left").pack(anchor="w",
+                                                                                               pady=(2, 10))
+        self.vigiladas = self._arbol(izq, [("carpeta", "Carpeta", 420)], alto=7)
+        self._botonera(izq, [("Agregar carpeta…", self.agregar_vigilada),
+                             ("Agregar el Escritorio", self.agregar_escritorio), ("Quitar", self.quitar_vigilada)])
+
+        der = ttk.Frame(p)
+        der.grid(row=0, column=1, sticky="nsew")
+        ttk.Label(der, text="Limpieza de Descargas", style="Titulo.TLabel").pack(anchor="w")
+        ttk.Label(der, style="Suave.TLabel", wraplength=360, justify="left",
+                  text="Los instaladores que ya usaste ocupan espacio. Ordenito puede mandarlos a la papelera "
+                       "(se recuperan con Deshacer).").pack(anchor="w", pady=(2, 8))
+        self.limpia = tk.BooleanVar(value=False)
+        ttk.Checkbutton(der, text="Limpiar automáticamente", variable=self.limpia,
+                        command=self.guardar_limpieza).pack(anchor="w")
+        fila = ttk.Frame(der)
+        fila.pack(anchor="w", pady=8)
+        ttk.Label(fila, text="Cuando lleven más de").pack(side="left")
+        self.dias = ttk.Spinbox(fila, from_=1, to=365, width=5, command=self.guardar_limpieza)
+        self.dias.pack(side="left", padx=6)
+        ttk.Label(fila, text="días en Descargas").pack(side="left")
+        ttk.Label(der, text="Tipos de archivo").pack(anchor="w")
+        self.tipos_limpieza = ttk.Entry(der)
+        self.tipos_limpieza.pack(fill="x", pady=(2, 0))
+        for campo in (self.dias, self.tipos_limpieza):
+            campo.bind("<FocusOut>", lambda e: self.guardar_limpieza())
+            campo.bind("<Return>", lambda e: self.guardar_limpieza())
+        self._botonera(der, [("Ver qué se limpiaría…", self.ver_limpieza)])
+
+        ttk.Separator(der).pack(fill="x", pady=18)
+        ttk.Label(der, text="Apariencia", style="Titulo.TLabel").pack(anchor="w", pady=(0, 4))
+        self.tema = tk.StringVar(value=preferencias().get("tema", "sistema"))
+        for valor, texto in (("sistema", "Como el sistema"), ("claro", "Claro"), ("oscuro", "Oscuro")):
+            ttk.Radiobutton(der, text=texto, value=valor, variable=self.tema,
+                            command=self.cambiar_tema).pack(anchor="w", pady=1)
+
     # ── arranque y refresco ──
     def _arrancar(self):
         if not o.CONFIG.exists():
@@ -605,10 +866,12 @@ class App(tk.Tk):
         self.cargar_actividad()
         self.cargar_descargas()
         self.cargar_carpetas()
+        self.cargar_ajustes()
         self._programadas.add(self.after(3000, self._refrescar))
 
     def _texto_vigila(self):
-        dl = o.bonito(o.carpeta_descargas())
+        carpetas = o.carpetas_vigiladas() if o.CONFIG.exists() else [o.carpeta_descargas()]
+        dl = o.bonito(carpetas[0]) + (f" y {len(carpetas) - 1} carpeta(s) más" if len(carpetas) > 1 else "")
         return f"Vigilando {dl}" if self.auto.get() else f"Pausado · {dl} no se ordena solo"
 
     def _refrescar(self):
@@ -619,6 +882,10 @@ class App(tk.Tk):
         if marca != self.marca_historial:
             self.cargar_actividad()
             self.cargar_descargas()
+        self.vueltas += 1
+        # Si sigue al sistema, cambia sola cuando cambias el tema de Windows/Mac (cada ~30 s)
+        if self.vueltas % 10 == 0 and self.tema.get() == "sistema" and (C == OSCURO) != (tema_elegido() == "oscuro"):
+            self._estilos()
         self._programadas = {self.after(3000, self._refrescar)}
 
     def avisar(self, texto):
@@ -683,6 +950,8 @@ class App(tk.Tk):
             r = self.registros[i]
             if r.get("duplicado_de"):
                 carpeta = f"Papelera (ya lo tenías en {o.bonito(Path(r['duplicado_de']).parent)})"
+            elif r.get("limpieza"):
+                carpeta = f"Papelera (limpieza: más de {r['limpieza']} días en Descargas)"
             else:
                 carpeta = o.bonito(Path(r["hacia"]).parent)
             filas.append((str(i), (hora(r["fecha"]), Path(r["desde"]).name, carpeta),
@@ -710,8 +979,9 @@ class App(tk.Tk):
             return
         _, r = elegidos[0]
         actual = Path(r["hacia"])
-        if r.get("duplicado_de"):
-            messagebox.showinfo("Está en la papelera", "Ese archivo era una copia idéntica y está en la papelera. "
+        if r.get("duplicado_de") or r.get("limpieza"):
+            motivo = "una copia idéntica" if r.get("duplicado_de") else "un instalador viejo"
+            messagebox.showinfo("Está en la papelera", f"Ese archivo era {motivo} y está en la papelera. "
                                 "Usa Deshacer si lo quieres recuperar.", parent=self)
             return
         if not actual.exists():
@@ -763,15 +1033,19 @@ class App(tk.Tk):
 
         def listo(plan):
             self.plan = {str(f): f for f, *_ in plan}
+            dl = o.real(o.carpeta_descargas())
             filas = []
             for f, res, carpeta, igual in plan:
+                de_descargas = o.real(f.parent) == dl
                 if igual:
                     destino, motivo = "Papelera", f"ya lo tienes en {o.bonito(igual.parent)}"
                 elif carpeta:
                     destino, motivo = o.bonito(carpeta), self._motivo(f, res)
                 else:
-                    destino, motivo = "Se queda en Descargas", "ninguna regla coincidió"
-                filas.append((str(f), (f.name, destino, motivo), *(() if carpeta else ("apagado",))))
+                    destino = "Se queda en Descargas" if de_descargas else "Se queda donde está"
+                    motivo = res.motivo if res.motivo == "ya está en su carpeta" else "ninguna regla coincidió"
+                nombre = f.name if de_descargas else f"{f.name}   ({f.parent.name})"
+                filas.append((str(f), (nombre, destino, motivo), *(() if carpeta else ("apagado",))))
             if not filas:
                 filas = [("vacio", ("Descargas está al día ✓", "Todo lo que llega se ordena solo"
                                     if self.auto.get() else "No hay nada pendiente", ""), "apagado")]
@@ -923,13 +1197,85 @@ class App(tk.Tk):
             self.cargar_actividad()
             self.avisar(f"{n} copia(s) a la papelera, {ahorro / 1e6:.1f} MB liberados.")
 
+    # ── ajustes ──
+    def cargar_ajustes(self):
+        carpetas = o.carpetas_vigiladas()
+        filas = [("descargas", (f"{o.bonito(carpetas[0])}   (Descargas, siempre)",), "apagado")]
+        filas += [(str(c), (o.bonito(c) + ("" if c.is_dir() else "   (no existe)"),)) for c in carpetas[1:]]
+        self._llenar(self.vigiladas, filas)
+        activa, dias, extensiones = o.ajustes_limpieza()
+        self.limpia.set(activa)
+        self.dias.set(dias)
+        self.tipos_limpieza.delete(0, "end")
+        self.tipos_limpieza.insert(0, ", ".join(sorted(e.lstrip(".") for e in extensiones)))
+
+    def _guardar_vigiladas(self, carpetas, aviso):
+        o.guardar_vigiladas(carpetas)
+        self.cargar_ajustes()
+        self.vigila.configure(text=self._texto_vigila())
+        self.cargar_descargas()
+        self.avisar(aviso)
+
+    def agregar_vigilada(self, carpeta=None):
+        carpeta = carpeta or filedialog.askdirectory(parent=self, title="¿Qué carpeta quieres que se ordene sola?",
+                                                     initialdir=str(o.HOME))
+        if not carpeta:
+            return
+        actuales = o.carpetas_vigiladas()
+        if any(o.real(c) == o.real(carpeta) for c in actuales):
+            self.avisar(f"{o.bonito(carpeta)} ya se ordena sola.")
+            return
+        destinos = {o.real(o.ruta_destino(r.destino)) for r in o.leer_reglas() if not r.comodin}
+        if o.real(carpeta) in destinos or o.real(carpeta) == o.real(o.HOME):
+            messagebox.showwarning("Esa carpeta no", "Esa carpeta es un destino de tus reglas (o tu carpeta "
+                                   "personal). Vigilarla haría que Ordenito saque archivos de donde ya los "
+                                   "guardaste. Elige una carpeta de \"entrada\", como el Escritorio.", parent=self)
+            return
+        self._guardar_vigiladas(actuales[1:] + [Path(carpeta)], f"Ahora también se ordena {o.bonito(carpeta)}.")
+
+    def agregar_escritorio(self):
+        self.agregar_vigilada(o.carpeta_escritorio())
+
+    def quitar_vigilada(self):
+        sel = self._seleccion(self.vigiladas, "Selecciona primero una carpeta.")
+        if not sel:
+            return
+        if "descargas" in sel:
+            self.avisar("Descargas siempre se ordena. Para pausarlo, desmarca Ordenar automáticamente.")
+            return
+        quedan = [c for c in o.carpetas_vigiladas()[1:] if str(c) not in sel]
+        self._guardar_vigiladas(quedan, "Listo: esa carpeta ya no se ordena sola (sus archivos no se tocan).")
+
+    def guardar_limpieza(self):
+        try:
+            dias = max(1, min(int(self.dias.get()), 3650))
+        except ValueError:
+            dias = o.ajustes_limpieza()[1]
+            self.dias.set(dias)
+        extensiones = [e.lstrip(".").lower() for e in lista(self.tipos_limpieza.get())]
+        if not extensiones:
+            extensiones = o.LIMPIEZA_TIPOS
+        actual = o.ajustes_limpieza()
+        nuevo = (self.limpia.get(), dias, {"." + e for e in extensiones})
+        if nuevo == actual:
+            return
+        o.guardar_limpieza(self.limpia.get(), dias, extensiones)
+        self.avisar(f"Limpieza automática: instaladores con más de {dias} días a la papelera." if self.limpia.get()
+                    else "Limpieza automática apagada.")
+
+    def ver_limpieza(self):
+        self.guardar_limpieza()
+        if Limpieza(self).mostrar():
+            self.cargar_actividad()
+
     # ── servicio ──
     def cambiar_servicio(self):
         quiero = self.auto.get()
         if not o.cambiar_servicio(quiero):
             self.auto.set(not quiero)
+            instalador = "instalar.cmd" if o.WINDOWS else "./instalar.sh"
             messagebox.showwarning("No pude cambiarlo", "No pude encender o apagar el servicio automático. "
-                                   "¿Instalaste Ordenito con ./instalar.sh?", parent=self)
+                                   f"¿Instalaste Ordenito con {instalador}?", parent=self)
         self.vigila.configure(text=self._texto_vigila())
         self.avisar("Ordenito ordenará tus descargas solo." if self.auto.get()
                     else "Pausado: usa Ordenar ahora cuando quieras.")

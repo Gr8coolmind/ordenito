@@ -39,9 +39,14 @@ class TestApp(unittest.TestCase):
             mock.patch.object(o, "ESTADO", self.home / ".estado"),
             mock.patch.object(o, "servicio_activo", lambda: False),
             mock.patch.object(o, "abrir", lambda ruta: None),
+            mock.patch.object(o, "notificar", lambda *a: None),
+            mock.patch.object(o, "carpeta_escritorio", lambda: self.home / "Desktop"),
+            mock.patch.object(app_mod, "sistema_oscuro", lambda: False),
             mock.patch.dict(os.environ, {"ORDENITO_CARPETA": str(self.dl),
                                          "XDG_DATA_HOME": str(self.home / ".share")}),
         ]
+        if o.WINDOWS:  # nunca tocar la Papelera de reciclaje de verdad
+            parches.append(mock.patch.object(o, "papelera", lambda f=None: self.home / "Papelera"))
         for p in parches:
             p.start()
             self.addCleanup(p.stop)
@@ -75,7 +80,7 @@ class TestApp(unittest.TestCase):
         self.addCleanup(raiz.destroy)
         creadas = self.asistente(raiz)
         self.assertGreater(creadas, 10)
-        texto = o.CONFIG.read_text()
+        texto = o.CONFIG.read_text(encoding="utf-8")
         self.assertIn("[Documents/Universidad/Redes I]", texto)
         self.assertIn("fuertes: Ana Pérez, RED-1010", texto)
         self.assertIn("[no sugerir]", texto)
@@ -93,6 +98,7 @@ class TestApp(unittest.TestCase):
             z.writestr("docProps/core.xml", "<dc:creator>Ana Pérez</dc:creator>")
         (self.dl / "factura.txt").write_text("Factura y comprobante de pago")
         (self.dl / "raro.xyz").write_text("?")
+        (self.dl / "desktop.ini").write_text("[.ShellClassInfo]")
 
         app = app_mod.App()
         self.addCleanup(app.destroy)
@@ -101,6 +107,7 @@ class TestApp(unittest.TestCase):
                  for i in app.descargas.get_children()}
         self.assertEqual(filas["tarea.docx"], "~/Documents/Universidad/Redes I")
         self.assertEqual(filas["raro.xyz"], "Se queda en Descargas")
+        self.assertNotIn("desktop.ini", filas, "los archivos del sistema no se muestran ni se mueven")
 
         app.ordenar_ahora()
         self.esperar(app)
@@ -113,7 +120,8 @@ class TestApp(unittest.TestCase):
         self.esperar(app)
         self.assertEqual(len(o._historial()), 1)
         # la primera fila es el movimiento más reciente (la tarea, que se ordenó última)
-        self.assertEqual(sorted(f.name for f in self.dl.iterdir() if f.is_file()), ["raro.xyz", "tarea.docx"])
+        self.assertEqual(sorted(f.name for f in self.dl.iterdir() if f.is_file()),
+                         ["desktop.ini", "raro.xyz", "tarea.docx"])
 
     def test_editor_guarda_y_quitar_borra_la_regla(self):
         raiz = tkinter.Tk()
@@ -136,6 +144,56 @@ class TestApp(unittest.TestCase):
             app.quitar_carpeta()
         self.assertFalse(any(r.destino == "Documents/Cocina" for r in o.leer_reglas()))
         self.assertTrue((self.home / "Documents/Cocina").is_dir(), "quitar la regla no borra la carpeta")
+
+    def test_asistente_puede_vigilar_escritorio_y_activar_limpieza(self):
+        (self.home / "Desktop").mkdir()
+        raiz = tkinter.Tk()
+        self.addCleanup(raiz.destroy)
+        a = app_mod.Asistente(raiz, primera_vez=True)
+        a.escritorio.set(True)
+        a.limpieza.set(True)
+        a.crear()
+        self.assertEqual([c.name for c in o.carpetas_vigiladas()], ["Downloads", "Desktop"])
+        self.assertTrue(o.ajustes_limpieza()[0])
+        self.assertIn("[vigilar]\nDesktop", o.CONFIG.read_text(encoding="utf-8"))
+
+    def test_ajustes_vigiladas_limpieza_y_tema(self):
+        raiz = tkinter.Tk()
+        self.asistente(raiz)
+        raiz.destroy()
+        escritorio = self.home / "Desktop"
+        escritorio.mkdir()
+        (escritorio / "factura.txt").write_text("Factura y comprobante de pago")
+        app = app_mod.App()
+        self.addCleanup(app.destroy)
+        self.esperar(app)
+
+        app.agregar_escritorio()
+        self.esperar(app)
+        self.assertEqual(len(app.vigiladas.get_children()), 2)
+        nombres = [app.descargas.item(i)["values"][0] for i in app.descargas.get_children()]
+        self.assertIn("factura.txt   (Desktop)", nombres)
+        with mock.patch.object(app_mod.messagebox, "showwarning") as aviso:
+            app.agregar_vigilada(str(self.home / "Documents/Personal/Finanzas"))
+        aviso.assert_called_once()  # un destino no se puede vigilar
+        app.vigiladas.selection_set(str(escritorio))
+        app.quitar_vigilada()
+        self.assertEqual([c.name for c in o.carpetas_vigiladas()], ["Downloads"])
+
+        app.limpia.set(True)
+        app.dias.set("12")
+        app.tipos_limpieza.delete(0, "end")
+        app.tipos_limpieza.insert(0, "exe, .ISO")
+        app.guardar_limpieza()
+        self.assertEqual(o.ajustes_limpieza(), (True, 12, {".exe", ".iso"}))
+
+        app.tema.set("oscuro")
+        app.cambiar_tema()
+        self.assertEqual(app_mod.C, app_mod.OSCURO)
+        self.assertEqual(app_mod.preferencias()["tema"], "oscuro")
+        app.tema.set("claro")
+        app.cambiar_tema()
+        self.assertEqual(app_mod.C, app_mod.CLARO)
 
 
 if __name__ == "__main__":
