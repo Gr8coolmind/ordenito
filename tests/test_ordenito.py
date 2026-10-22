@@ -698,7 +698,15 @@ class TestIA(Base):
         self.assertEqual(self.ordenar(), 0)
         self.assertEqual(self.ordenar(), 0)
         self.assertTrue(f.exists())
-        self.assertEqual(len(self.preguntas), 1, "la respuesta de cada archivo se recuerda")
+        self.assertEqual(len(self.preguntas), 2, "un 'no sé' se intenta dos veces y después se recuerda")
+
+    def test_segundo_intento_si_la_primera_no_sirve(self):
+        respuestas = iter([{"carpeta": "", "palabras": []},
+                           {"carpeta": "Documents/Gimnasio", "palabras": ["sentadillas"]}])
+        with mock.patch.object(ordenito, "_ollama", lambda *a: next(respuestas)):
+            self.archivo("rutina.txt", "sentadillas y press de banca")
+            self.assertEqual(self.ordenar(), 1)
+        self.assertTrue((self.home / "Documents/Gimnasio/rutina.txt").exists())
 
     def test_nombres_mudos_sin_texto_ni_se_preguntan(self):
         self.responder("Documents/Sin texto")

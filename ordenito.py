@@ -1075,6 +1075,7 @@ IA_URL = "http://127.0.0.1:11434"
 IA_TEXTO = 3000          # caracteres del contenido que lee el modelo
 IA_ESPERA = 300          # segundos por archivo (piensa ~1 min; la primera vez además carga el modelo)
 IA_PROFUNDIDAD = 3       # como mucho Documents/Tema/Subtema
+IA_INTENTOS = 2          # preguntas por archivo antes de dejarlo en Descargas
 IA_MAX_CARPETAS = 200    # carpetas que se le muestran como opciones
 IA_GENERICAS = {"documento", "documentos", "archivo", "archivos", "pdf", "imagen", "foto", "texto",
                 "descarga", "informe", "file", "document"}   # no sirven de pista: valdrían para todo
@@ -1202,17 +1203,20 @@ def preguntar_ia(f, reglas):
     raices = _raices_ia(reglas)
     conocidas = _carpetas_conocidas(reglas, raices)
     texto = re.sub(r"\s+", " ", contenido(f)).strip()[:IA_TEXTO]
-    if not _dice_algo(f, texto):
-        propuesta = palabras = None
-    else:
+    prohibidas, destino, palabras = no_sugerir(), None, None
+    # Al razonar no siempre llega a lo mismo: si hay de qué hablar, un "no sé" merece un segundo intento
+    for _ in range(IA_INTENTOS if _dice_algo(f, texto) else 0):
         try:
             respuesta = _ollama(modelo, _pregunta_ia(f, conocidas, texto), piensa)
             propuesta, palabras = respuesta.get("carpeta"), respuesta.get("palabras")
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
             _anotar_error(f"IA ({modelo}): {error}")   # Ollama apagado: se vuelve a intentar con la próxima descarga
             return None
-    prohibidas = no_sugerir()
-    destino = carpeta_ia(propuesta, conocidas, raices, prohibidas)
+        destino = carpeta_ia(propuesta, conocidas, raices, prohibidas)
+        if destino:
+            break
+        if propuesta:
+            _anotar_error(f"IA: carpeta rechazada para {f.name}: {propuesta!r}")
     memoria = {k: v for k, v in memoria.items() if Path(k.split("|")[0]).exists()}
     memoria[clave] = {"carpeta": destino, "palabras": palabras_ia(palabras, prohibidas)} if destino else None
     _guardar_json("ia.json", memoria)
