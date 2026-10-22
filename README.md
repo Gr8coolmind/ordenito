@@ -50,9 +50,10 @@ La mayoría de los organizadores solo miran la extensión: todos los PDF juntos,
 | 🎓 **Aprende de tus correcciones** | `ordenito corregir archivo carpeta` lo mueve a donde va y te ofrece aprender la pista que faltaba (el autor, el código de la materia, el docente). |
 | 👯 **Sin duplicados** | Si descargas algo que ya tenías, no guarda una copia `(1)`: la manda a la papelera y te avisa. `ordenito duplicados` encuentra las copias que ya tienes. |
 | ↩️ **Se puede deshacer** | `ordenito deshacer` devuelve el archivo, y Ordenito no lo vuelve a mover. |
-| 🔒 **100 % local** | No usa internet ni IA en la nube. Nada de tus documentos sale de tu computadora. |
+| 🔒 **100 % local** | No usa internet ni IA en la nube (la IA opcional corre en tu equipo). Nada de tus documentos sale de tu computadora. |
 | 📄 **Lee PDF sin instalar nada** | Trae su propio lector de PDF (también los que exporta Word). Si tienes `pdftotext`, lo usa. |
 | 🖥️ **Más carpetas** | Además de Descargas, puede ordenar el Escritorio u otras carpetas de "entrada" (bloque `[vigilar]`). |
+| 🤖 **IA local (opcional)** | Lo que ninguna regla reconoce lo decide un modelo que corre en tu equipo con [Ollama](https://ollama.com), gratis y sin internet. Elige una carpeta tuya o **crea una nueva**, y escribe la regla para que la próxima vez no haga falta preguntarle (bloque `[ia]`). |
 | 🧹 **Limpieza de Descargas** | Opcional: manda a la papelera los instaladores, ISOs y torrents con más de N días (bloque `[limpieza]`). |
 | 🌙 **Modo oscuro** | La app sigue el tema del sistema, o lo eliges en Ajustes. |
 | 🪶 **Cero dependencias** | Solo Python y su biblioteca estándar (la app usa Tkinter, que viene con Python). |
@@ -132,9 +133,13 @@ flowchart LR
     E -- sí --> F[Gana el de más puntos<br/>→ baja a la subcarpeta<br/>más específica<br/>→ aplica comodines]
     E -- no --> G{¿Hay respaldo<br/>para su tipo?}
     G -- sí --> H[Carpeta por tipo<br/>Fotos, Videos…]
-    G -- no --> I[Se queda en<br/>Descargas]
+    G -- no --> K{¿IA local<br/>activada?}
+    K -- sí --> L[La IA elige o crea<br/>la carpeta y escribe<br/>la regla]
+    K -- no --> I[Se queda en<br/>Descargas]
+    L -- no lo tiene claro --> I
     F --> J[📁 Mueve + 🔔 avisa]
     H --> J
+    L --> J
 ```
 
 - Una pista **fuerte** (profesor, código de materia, empresa, cliente) vale **25 puntos** si aparece en el nombre, el autor, el encabezado o la portada, y **3** si solo se menciona de pasada en el cuerpo.
@@ -176,6 +181,10 @@ Desktop
 [limpieza]
 dias: 30
 extensiones: exe, msi, iso, torrent
+
+# Lo que ninguna regla reconoce lo decide la IA local (ver «IA local»)
+[ia]
+modelo: qwen3:4b
 ```
 
 **Consejos para buenas reglas**
@@ -185,6 +194,38 @@ extensiones: exe, msi, iso, torrent
 - Después de editar, comprueba con `ordenito explicar` y `ordenito revisar`.
 
 El [archivo de ejemplo](reglas.ejemplo.conf) trae categorías listas para estudios, trabajo, trading, documentos personales, imágenes y respaldos por tipo.
+
+## 🤖 IA local (opcional)
+
+Las reglas son rápidas y nunca se equivocan con lo que ya conocen, pero un archivo de un tema nuevo se queda en Descargas. Con la IA local, ese archivo también encuentra su lugar:
+
+1. Instala [Ollama](https://ollama.com) (gratis): `winget install Ollama.Ollama` en Windows, `brew install ollama` en Mac, o `curl -fsSL https://ollama.com/install.sh | sh` en Linux.
+2. Descarga un modelo pequeño: `ollama pull qwen3:4b` (unos 2.5 GB; funciona en cualquier equipo con 8 GB de RAM, y más rápido con tarjeta gráfica).
+3. Agrega a tus reglas:
+   ```ini
+   [ia]
+   modelo: qwen3:4b
+   ```
+
+Desde ese momento, cuando ningún tema ni respaldo por tipo coincide, Ordenito le pasa a la IA el nombre del archivo, el inicio de su contenido y la lista de tus carpetas, y:
+
+- si encaja en una carpeta que **ya tienes**, va ahí;
+- si es de un tema nuevo, **crea la carpeta** dentro de `Documents` (por ejemplo `Documents/Universidad/Bases de Datos`), te avisa con una notificación y **escribe la regla** con las palabras clave del tema, marcada con `# la creó la IA`. El próximo archivo parecido lo ordena esa regla, sin preguntarle a la IA;
+- si no lo tiene claro (una foto `IMG_2041.jpg` sin nada más), lo deja en Descargas.
+
+Para que no se salga de lo suyo:
+- Las reglas siempre van primero. La IA solo ve lo que ninguna regla reconoció.
+- Solo crea carpetas dentro de `Documents` o de las carpetas que ya usan tus reglas, con 3 niveles como máximo. Nunca en Descargas, nunca fuera de tu carpeta personal ni con nombres que tu sistema no acepta. Si la carpeta ya existe escrita distinto (`redes` y `Redes`), usa la tuya.
+- Nunca usa los nombres de `[no sugerir]` como carpeta ni como pista.
+- Recuerda lo que respondió para cada archivo: no le pregunta dos veces lo mismo.
+- `ordenito deshacer` devuelve el archivo y, si la carpeta que creó quedó vacía, la quita junto con su regla.
+- Si Ollama está apagado, no pasa nada: el archivo espera en Descargas y se intenta con la próxima descarga.
+
+Antes de responder, el modelo **razona** sobre el tema del archivo. Eso le lleva cerca de un minuto por archivo (en segundo plano, y solo con lo que tus reglas no reconocieron), pero acierta mucho más: en nuestras pruebas, 5 de 6 contra 3 de 6. Si prefieres respuestas en un par de segundos, escribe `rápida` dentro de `[ia]`.
+
+Si un archivo no tiene texto y su nombre no dice nada (`IMG_2041.jpg`, `DSC0012.png`, `Screenshot…`), ni se le pregunta: se queda en Descargas o va a su respaldo por tipo.
+
+Para pausarla, escribe `apagada` dentro de `[ia]`. Para usar otro modelo, cambia la línea `modelo:` (por ejemplo `gemma3:4b`, o `qwen3:1.7b` si tu equipo es más modesto).
 
 ## 🛠️ Comandos
 
@@ -231,7 +272,7 @@ Tu nombre y el de tus compañeros salen en todos tus trabajos, así que no sirve
 
 ## 🛡️ Seguridad y privacidad
 
-- **Todo ocurre en tu equipo.** No hay red, telemetría ni servicios externos.
+- **Todo ocurre en tu equipo.** No hay red, telemetría ni servicios externos. La IA local (si la activas) también corre en tu equipo: Ordenito solo le habla a Ollama en `127.0.0.1`.
 - **Nunca sobrescribe ni borra nada.** Si ya existe un `informe.pdf` distinto, guarda el nuevo como `informe (2).pdf`. Si es idéntico, la copia va a la **papelera** (no se borra) y se recupera con `ordenito deshacer`.
 - **No toca descargas a medias.** Ignora `.part` y `.crdownload`, y espera a que el archivo deje de crecer.
 - **Lee con límites.** Lee como máximo 2 MB por parte de cada documento y 5 páginas de cada PDF, así que una *zip bomb* no puede llenarte la memoria.

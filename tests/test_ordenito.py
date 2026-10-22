@@ -622,12 +622,152 @@ class TestCarpetas(Base):
         self.assertTrue((self.home / "Docs/Uni/Ingles/tarea.txt").exists())
         self.assertFalse((ordenito.ESTADO / "vigilante.pid").exists(), "al salir borra su marca")
 
+    def test_vigilar_no_pierde_lo_que_llega_mientras_ordena(self):
+        self.archivo("tarea.txt", "english grammar")
+        ordenar = ordenito.ordenar
+
+        def lento(**kw):  # mientras ordena (la IA puede tardar), llega otra descarga
+            movidos = ordenar(**kw)
+            if not (self.dl / "curso.txt").exists() and not (self.home / "Docs/Cursos/curso.txt").exists():
+                self.archivo("curso.txt", "coursera")
+            return movidos
+        with mock.patch.object(ordenito, "ordenar", lento):
+            ordenito.vigilar(pausa=0.01, vueltas=3)
+        self.assertTrue((self.home / "Docs/Cursos/curso.txt").exists())
+
     def test_terminado_no_espera_si_hace_rato_que_no_cambia(self):
         f = self.archivo("viejo.txt", "x")
         os.utime(f, (time.time() - 60, time.time() - 60))
         inicio = time.time()
         self.assertTrue(ordenito.terminado(f))
         self.assertLess(time.time() - inicio, 1)
+
+
+class TestIA(Base):
+    """La IA local (Ollama) se simula: aquí se prueba qué hace Ordenito con lo que responde."""
+
+    def setUp(self):
+        super().setUp()
+        with ordenito.CONFIG.open("a", encoding="utf-8") as c:
+            c.write("\n[no sugerir]\nana perez\n\n[ia]\nmodelo: prueba:1b\n")
+        self.preguntas = []
+
+    def responder(self, carpeta, palabras=("bases de datos", "sql", "normalizacion")):
+        def falso(modelo, pregunta, piensa=True):
+            self.preguntas.append((modelo, pregunta, piensa))
+            return {"carpeta": carpeta, "palabras": list(palabras)}
+        p = mock.patch.object(ordenito, "_ollama", falso)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def ordenar(self, **kw):
+        with redirect_stdout(io.StringIO()):
+            return ordenito.ordenar(esperar=False, avisar=False, **kw)
+
+    def test_sin_bloque_ia_no_pregunta(self):
+        ordenito.CONFIG.write_text(REGLAS, encoding="utf-8")
+        self.responder("Documents/Universidad/Bases de Datos")
+        self.archivo("apuntes.txt", "tablas y llaves primarias")
+        self.assertEqual(self.ordenar(), 0)
+        self.assertEqual(self.preguntas, [])
+
+    def test_crea_carpeta_y_aprende_la_regla(self):
+        self.responder("Documents/Universidad/Bases de Datos")
+        self.archivo("apuntes.txt", "tablas, llaves primarias y normalizacion en sql")
+        self.assertEqual(self.ordenar(), 1)
+        self.assertTrue((self.home / "Documents/Universidad/Bases de Datos/apuntes.txt").exists())
+        self.assertEqual(self.preguntas[0][0], "prueba:1b")
+        regla = next(r for r in ordenito.leer_reglas() if r.destino == "Documents/Universidad/Bases de Datos")
+        self.assertIn("sql", regla.palabras)
+        # El siguiente archivo parecido lo reconoce la regla: ya no se le pregunta a la IA
+        self.archivo("tarea sql.txt", "consultas")
+        self.assertEqual(self.ordenar(), 1)
+        self.assertEqual(len(self.preguntas), 1)
+        self.assertTrue((self.home / "Documents/Universidad/Bases de Datos/tarea sql.txt").exists())
+
+    def test_las_reglas_van_primero(self):
+        self.responder("Documents/Otra")
+        self.archivo("tarea.docx", "subnetting y enrutamiento")
+        self.ordenar()
+        self.assertTrue((self.home / "Docs/Uni/Redes/tarea.docx").exists())
+        self.assertEqual(self.preguntas, [])
+
+    def test_no_sabe_y_no_vuelve_a_preguntar(self):
+        self.responder("")
+        f = self.archivo("plano del departamento.heic")
+        self.assertEqual(self.ordenar(), 0)
+        self.assertEqual(self.ordenar(), 0)
+        self.assertTrue(f.exists())
+        self.assertEqual(len(self.preguntas), 1, "la respuesta de cada archivo se recuerda")
+
+    def test_nombres_mudos_sin_texto_ni_se_preguntan(self):
+        self.responder("Documents/Sin texto")
+        for nombre in ["IMG_2041.heic", "DSC0012.heic", "Screenshot 2026-10-18 020835.heic", "1234.bin"]:
+            self.archivo(nombre)
+        self.assertEqual(self.ordenar(), 0)
+        self.assertEqual(self.preguntas, [])
+
+    def test_sin_ollama_no_rompe_y_reintenta(self):
+        def apagado(*a):
+            self.preguntas.append(a)
+            raise ConnectionRefusedError("no hay nadie en el puerto 11434")
+        with mock.patch.object(ordenito, "_ollama", apagado):
+            f = self.archivo("apuntes.txt", "algo")
+            self.assertEqual(self.ordenar(), 0)
+            self.assertEqual(self.ordenar(), 0)
+        self.assertTrue(f.exists())
+        self.assertEqual(len(self.preguntas), 2, "un fallo no se recuerda: se vuelve a intentar")
+
+    def test_rutas_peligrosas_se_rechazan(self):
+        raices, conocidas = {"Documents", "Docs"}, ["Docs/Uni/Redes"]
+        for mala in ["../../Windows", "C:/Windows/System32", "Documents/../..", "Documents", "Desktop/Cosas",
+                     "Documents/a/b/c/d", "Documents/CON", "Documents/x:y", "Documents/Ana Perez/Tareas",
+                     "Documents/" + "x" * 50, None, 42]:
+            self.assertIsNone(ordenito.carpeta_ia(mala, conocidas, raices, {"ana perez"}), mala)
+        self.assertEqual(ordenito.carpeta_ia("documents\\Bases de Datos", conocidas, raices),
+                         "Documents/Bases de Datos")
+
+    def test_usa_la_carpeta_existente_escrita_distinto(self):
+        self.assertEqual(ordenito.carpeta_ia("docs/UNI/redés", ["Docs/Uni/Redes"], {"Docs"}), "Docs/Uni/Redes")
+
+    def test_palabras_limpias(self):
+        self.assertEqual(ordenito.palabras_ia(["SQL", "pdf", "ana perez", "a,b", "12", "sql", "x" * 60,
+                                               "bases [de] datos"], {"ana perez"}),
+                         ["sql", "a b", "bases de datos"])
+        self.assertEqual(ordenito.palabras_ia("no es una lista"), [])
+
+    def test_ve_las_carpetas_que_ya_tienes(self):
+        (self.home / "Documents/Recetas").mkdir(parents=True)
+        (self.home / "Documents/.oculta").mkdir()
+        (self.home / "Documents/My Games").mkdir()
+        (self.home / "Documents/mi-repo/.git").mkdir(parents=True)
+        self.responder("Documents/Recetas")
+        self.archivo("pan.txt", "harina y levadura")
+        self.ordenar()
+        pregunta = self.preguntas[0][1]
+        self.assertIn("- Documents/Recetas", pregunta)
+        self.assertIn("- Docs/Uni/Redes", pregunta)
+        for fuera in (".oculta", "My Games", "mi-repo"):
+            self.assertNotIn(fuera, pregunta)
+        self.assertTrue((self.home / "Documents/Recetas/pan.txt").exists())
+
+    def test_deshacer_quita_la_carpeta_y_la_regla_que_creo(self):
+        self.responder("Documents/Hobbies/Cocina", ["receta", "harina"])
+        self.archivo("pan.txt", "harina y levadura")
+        self.ordenar()
+        with redirect_stdout(io.StringIO()):
+            ordenito.deshacer(1)
+        self.assertTrue((self.dl / "pan.txt").exists())
+        self.assertFalse((self.home / "Documents/Hobbies").exists())
+        self.assertFalse(any(r.destino == "Documents/Hobbies/Cocina" for r in ordenito.leer_reglas()))
+
+    def test_ajustes(self):
+        self.assertEqual(ordenito.ajustes_ia(), (True, "prueba:1b", True))
+        ordenito.CONFIG.write_text(REGLAS + "\n[ia]\nrápida\n", encoding="utf-8")
+        self.assertEqual(ordenito.ajustes_ia(), (True, ordenito.IA_MODELO, False))
+        ordenito.CONFIG.write_text(REGLAS + "\n[ia]\napagada\n", encoding="utf-8")
+        self.assertEqual(ordenito.ajustes_ia()[0], False)
+        self.assertFalse(any(r.destino == "ia" for r in ordenito.leer_reglas()))
 
 
 class TestEjemplo(unittest.TestCase):
