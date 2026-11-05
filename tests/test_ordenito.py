@@ -159,6 +159,18 @@ class TestClasificar(Base):
     def test_una_sola_mencion_no_basta(self):
         self.assertIsNone(self.destino("notas.txt", "hablamos de una vlan"))
 
+    def test_una_palabra_comun_repetida_no_basta(self):
+        # Un informe de horas que cita archivos como English_Singapore.php no es de la materia de inglés
+        texto = "Horas de la semana: English_Singapore.php English_Zimbabwe.php English_Canada.php"
+        self.assertIsNone(self.destino("PDF_Semanal.txt", texto))
+
+    def test_palabra_repetida_cuenta_si_el_nombre_se_parece(self):
+        guardado = self.home / "Docs/Uni/Ingles"
+        guardado.mkdir(parents=True)
+        (guardado / "Tarea Semana Uno.txt").write_text("x")
+        res = ordenito.clasificar(self.archivo("Tarea Semana Uno (2).txt", "english english"), self.reglas)
+        self.assertEqual(res.destino, "Docs/Uni/Ingles")
+
     def test_pista_fuerte_en_autor_gana_a_palabras_de_tema(self):
         # El tema dice "redes" muchas veces, pero el autor del documento es el profesor de Seguridad
         f = docx(self.dl / "caso.docx", "subnetting vlan enrutamiento router " * 5, autor="Carlos Ruiz")

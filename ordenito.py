@@ -716,6 +716,17 @@ def puntuar(palabras, nombre, texto, fuertes=()):
     return puntos, pistas
 
 
+def floja(regla, nombre, texto):
+    """¿Lo único que tiene el bloque es una palabra común repetida en el cuerpo? Eso no dice de qué
+    trata el archivo: una tabla que cita English_Singapore.php no es de la materia de inglés.
+    Un código (red-1015) sí distingue, y un bloque con extensiones ya viene acotado."""
+    if regla.extensiones or any(contar(p, nombre) or contar(p, texto) for p in regla.fuertes) \
+            or any(contar(p, nombre) for p in regla.palabras):
+        return False
+    halladas = [p for p in regla.palabras if contar(p, texto)]
+    return len(halladas) == 1 and halladas[0].replace(" ", "").isalpha()
+
+
 VACIAS = {"de", "del", "la", "las", "el", "los", "y", "e", "o", "en", "a", "al", "con", "por", "para",
           "un", "una", "the", "of", "and", "to", "in", "for", "on", "copia", "copy", "final", "v1", "v2"}
 
@@ -772,7 +783,7 @@ class Resultado:
 def clasificar(f, reglas):
     nombre = normalizar(f.stem)
     texto = normalizar(contenido(f))[:MAX_TEXTO]
-    tabla, comodines, por_tipo = {}, [], None
+    tabla, comodines, por_tipo, flojas = {}, [], None, set()
     for r in reglas:
         if r.extensiones and f.suffix.lower() not in r.extensiones:
             continue
@@ -784,13 +795,16 @@ def clasificar(f, reglas):
             puntos, pistas = puntuar(r.palabras, nombre, texto, r.fuertes)
             if puntos:
                 tabla[r.destino] = (puntos, pistas)
+                if floja(r, nombre, texto):
+                    flojas.add(r.destino)
     # Archivos de nombre parecido que ya guardaste: la presentación del "Caso 3 Tienda Lunar"
     # va junto al documento del "Caso de Estudio 3 Tienda Lunar", aunque hable de otro tema
     for destino, (puntos, pistas) in vecinos(f, reglas, nombre).items():
         antes, previas = tabla.get(destino, (0, []))
         tabla[destino] = (antes + puntos, previas + pistas)
+        flojas.discard(destino)
 
-    validos = {d: p for d, (p, _) in tabla.items() if p >= MINIMO}
+    validos = {d: p for d, (p, _) in tabla.items() if p >= MINIMO and d not in flojas}
     if not validos:
         if por_tipo:
             return Resultado(por_tipo, 0, f"ningún tema coincidió; por tipo ({f.suffix})", tabla)
